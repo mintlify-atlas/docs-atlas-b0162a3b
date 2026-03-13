@@ -1,0 +1,551 @@
+---
+title: Configuration
+description: Complete configuration reference for Membrane
+---
+
+Membrane is configured via a YAML file, command-line flags, or environment variables. This guide covers all available configuration options.
+
+## Configuration Precedence
+
+Settings are applied in this order (later sources override earlier ones):
+
+1. Default values from `membrane.DefaultConfig()`
+2. YAML configuration file
+3. Environment variables
+4. Command-line flags
+
+## Complete YAML Example
+
+Here's a full configuration file showing all available options:
+
+```yaml config.yaml
+backend: "sqlite"
+db_path: "membrane.db"
+listen_addr: ":9090"
+decay_interval: "1h"
+consolidation_interval: "6h"
+default_sensitivity: "low"
+selection_confidence_threshold: 0.7
+
+# PostgreSQL backend (optional)
+# postgres_dsn: "postgres://membrane:password@localhost:5432/membrane?sslmode=require"
+
+# Embedding support (Postgres only)
+# embedding_endpoint: "https://api.openai.com/v1/embeddings"
+# embedding_model: "text-embedding-3-small"
+# embedding_dimensions: 1536
+# embedding_api_key: ""  # or set MEMBRANE_EMBEDDING_API_KEY
+
+# LLM-backed semantic extraction (Postgres only)
+# llm_endpoint: "https://api.openai.com/v1/chat/completions"
+# llm_model: "gpt-5-mini"
+# llm_api_key: ""  # or set MEMBRANE_LLM_API_KEY
+
+# Security
+# encryption_key: ""  # or set MEMBRANE_ENCRYPTION_KEY (32 bytes for SQLCipher)
+# api_key: ""         # or set MEMBRANE_API_KEY
+# tls_cert_file: "/etc/membrane/certs/server.crt"
+# tls_key_file: "/etc/membrane/certs/server.key"
+rate_limit_per_second: 100
+```
+
+## Configuration Fields
+
+### Backend Selection
+
+#### `backend`
+
+- **Type:** `string`
+- **Default:** `"sqlite"`
+- **Options:** `"sqlite"`, `"postgres"`
+- **Description:** Selects the storage backend
+
+<Tabs>
+  <Tab title="SQLite (Default)">
+    ```yaml
+    backend: "sqlite"
+    db_path: "membrane.db"
+    ```
+
+    Best for:
+    - Single-process deployments
+    - Embedded usage
+    - Development and testing
+    - Low-latency local access
+  </Tab>
+
+  <Tab title="PostgreSQL">
+    ```yaml
+    backend: "postgres"
+    postgres_dsn: "postgres://user:pass@host:5432/membrane"
+    ```
+
+    Best for:
+    - Multi-process concurrent access
+    - Production deployments
+    - Embedding-backed retrieval (with pgvector)
+    - Distributed systems
+  </Tab>
+</Tabs>
+
+#### `db_path`
+
+- **Type:** `string`
+- **Default:** `"membrane.db"`
+- **Description:** Path to SQLite database file (SQLite backend only)
+- **Example:**
+  ```yaml
+  db_path: "/var/lib/membrane/membrane.db"
+  ```
+
+#### `postgres_dsn`
+
+- **Type:** `string`
+- **Default:** `""`
+- **Environment:** `MEMBRANE_POSTGRES_DSN`
+- **Description:** PostgreSQL connection string (Postgres backend only)
+- **Example:**
+  ```yaml
+  postgres_dsn: "postgres://membrane:password@localhost:5432/membrane?sslmode=require"
+  ```
+
+### Network Configuration
+
+#### `listen_addr`
+
+- **Type:** `string`
+- **Default:** `":9090"`
+- **Description:** gRPC server listen address
+- **Examples:**
+  ```yaml
+  listen_addr: ":9090"           # All interfaces, port 9090
+  listen_addr: "127.0.0.1:8080"  # Localhost only, port 8080
+  listen_addr: "0.0.0.0:9090"    # Explicit all interfaces
+  ```
+
+### Background Jobs
+
+#### `decay_interval`
+
+- **Type:** `duration`
+- **Default:** `"1h"`
+- **Description:** How often to run salience decay
+- **Examples:**
+  ```yaml
+  decay_interval: "30m"  # Every 30 minutes
+  decay_interval: "2h"   # Every 2 hours
+  decay_interval: "15m"  # Every 15 minutes
+  ```
+
+<Note>
+The decay scheduler applies exponential decay based on each record's `half_life_seconds` parameter.
+</Note>
+
+#### `consolidation_interval`
+
+- **Type:** `duration`
+- **Default:** `"6h"`
+- **Description:** How often to run consolidation (extract semantic facts, competence, plan graphs)
+- **Examples:**
+  ```yaml
+  consolidation_interval: "6h"   # Every 6 hours
+  consolidation_interval: "12h"  # Twice daily
+  consolidation_interval: "1h"   # Every hour
+  ```
+
+Consolidation performs:
+- Structural semantic extraction (subject-predicate-object patterns)
+- Competence extraction from episodic success/failure patterns
+- Plan graph extraction from tool call sequences
+- LLM-backed semantic extraction (if configured)
+
+### Policy Defaults
+
+#### `default_sensitivity`
+
+- **Type:** `string`
+- **Default:** `"low"`
+- **Options:** `"public"`, `"low"`, `"medium"`, `"high"`, `"hyper"`
+- **Description:** Default sensitivity level for ingested records
+
+```yaml
+default_sensitivity: "low"
+```
+
+Sensitivity levels control trust-gated retrieval:
+
+| Level | Use Case | Example |
+|-------|----------|----------|
+| `public` | Openly shareable | Public documentation |
+| `low` | Minimal sensitivity | General preferences |
+| `medium` | Moderate protection | Project-specific knowledge |
+| `high` | Sensitive data | API keys, credentials |
+| `hyper` | Maximum protection | Security audit findings |
+
+#### `selection_confidence_threshold`
+
+- **Type:** `float64`
+- **Default:** `0.7`
+- **Range:** `0.0` to `1.0`
+- **Description:** Minimum confidence for competence/plan_graph selection
+
+```yaml
+selection_confidence_threshold: 0.7
+```
+
+Records below this threshold are excluded from multi-solution selection during retrieval.
+
+### Embedding Configuration
+
+<Note>
+Embedding support requires the Postgres backend.
+</Note>
+
+#### `embedding_endpoint`
+
+- **Type:** `string`
+- **Default:** `""`
+- **Description:** HTTP endpoint for embedding generation
+- **Example:**
+  ```yaml
+  embedding_endpoint: "https://api.openai.com/v1/embeddings"
+  ```
+
+#### `embedding_model`
+
+- **Type:** `string`
+- **Default:** `""`
+- **Description:** Model name sent to the embedding endpoint
+- **Examples:**
+  ```yaml
+  embedding_model: "text-embedding-3-small"
+  embedding_model: "text-embedding-3-large"
+  embedding_model: "text-embedding-ada-002"
+  ```
+
+#### `embedding_dimensions`
+
+- **Type:** `int`
+- **Default:** `1536`
+- **Description:** Output dimension of the embedding model
+- **Examples:**
+  ```yaml
+  embedding_dimensions: 1536  # text-embedding-3-small
+  embedding_dimensions: 3072  # text-embedding-3-large
+  embedding_dimensions: 1024  # custom model
+  ```
+
+#### `embedding_api_key`
+
+- **Type:** `string`
+- **Default:** `""`
+- **Environment:** `MEMBRANE_EMBEDDING_API_KEY`
+- **Description:** API key for embedding endpoint authentication
+- **Recommendation:** Use environment variable instead of config file
+
+```bash
+export MEMBRANE_EMBEDDING_API_KEY="sk-..."
+```
+
+### LLM Configuration
+
+<Note>
+LLM-backed semantic extraction requires Postgres backend and embedding configuration.
+</Note>
+
+#### `llm_endpoint`
+
+- **Type:** `string`
+- **Default:** `""`
+- **Description:** HTTP endpoint for LLM chat completions
+- **Example:**
+  ```yaml
+  llm_endpoint: "https://api.openai.com/v1/chat/completions"
+  ```
+
+#### `llm_model`
+
+- **Type:** `string`
+- **Default:** `""`
+- **Description:** Model name for semantic extraction
+- **Examples:**
+  ```yaml
+  llm_model: "gpt-5-mini"
+  llm_model: "gpt-4o-mini"
+  llm_model: "claude-3-haiku"
+  ```
+
+#### `llm_api_key`
+
+- **Type:** `string`
+- **Default:** `""`
+- **Environment:** `MEMBRANE_LLM_API_KEY`
+- **Description:** API key for LLM endpoint authentication
+- **Recommendation:** Use environment variable
+
+```bash
+export MEMBRANE_LLM_API_KEY="sk-..."
+```
+
+### Security Configuration
+
+#### `encryption_key`
+
+- **Type:** `string`
+- **Default:** `""`
+- **Environment:** `MEMBRANE_ENCRYPTION_KEY`
+- **Description:** SQLCipher encryption key (SQLite only)
+- **Requirements:** Must be exactly 32 bytes
+
+```bash
+export MEMBRANE_ENCRYPTION_KEY="your-32-byte-encryption-key-here!"
+```
+
+<Note>
+Store encryption keys securely using a secrets manager. Never commit keys to version control.
+</Note>
+
+#### `api_key`
+
+- **Type:** `string`
+- **Default:** `""`
+- **Environment:** `MEMBRANE_API_KEY`
+- **Description:** Bearer token for gRPC authentication
+
+```bash
+export MEMBRANE_API_KEY="your-secret-api-key"
+```
+
+Clients must send this in the `authorization` metadata:
+
+```
+authorization: Bearer your-secret-api-key
+```
+
+#### `tls_cert_file`
+
+- **Type:** `string`
+- **Default:** `""`
+- **Description:** Path to TLS certificate PEM file
+
+```yaml
+tls_cert_file: "/etc/membrane/certs/server.crt"
+```
+
+#### `tls_key_file`
+
+- **Type:** `string`
+- **Default:** `""`
+- **Description:** Path to TLS private key PEM file
+
+```yaml
+tls_key_file: "/etc/membrane/certs/server.key"
+```
+
+#### `rate_limit_per_second`
+
+- **Type:** `int`
+- **Default:** `100`
+- **Description:** Maximum requests per second per client (0 = no limit)
+
+```yaml
+rate_limit_per_second: 100
+```
+
+## Environment Variables
+
+All sensitive configuration can be set via environment variables:
+
+| Variable | Purpose | Example |
+|----------|---------|----------|
+| `MEMBRANE_ENCRYPTION_KEY` | SQLCipher encryption key | `"32-byte-key-here"` |
+| `MEMBRANE_POSTGRES_DSN` | PostgreSQL connection string | `"postgres://..."` |
+| `MEMBRANE_EMBEDDING_API_KEY` | Embedding endpoint API key | `"sk-..."` |
+| `MEMBRANE_LLM_API_KEY` | LLM endpoint API key | `"sk-..."` |
+| `MEMBRANE_API_KEY` | gRPC authentication token | `"your-secret"` |
+
+## Command-Line Flags
+
+Flags override all other configuration sources:
+
+```bash
+./bin/membraned \
+  --config /etc/membrane/config.yaml \
+  --db /var/lib/membrane/membrane.db \
+  --addr :8080
+```
+
+| Flag | Description |
+|------|-------------|
+| `--config` | Path to YAML config file |
+| `--db` | SQLite database path |
+| `--postgres-dsn` | PostgreSQL DSN (selects postgres backend) |
+| `--addr` | gRPC listen address |
+| `--version` | Print version and exit |
+
+## Deployment Tiers
+
+Membrane supports four deployment tiers with different capabilities:
+
+### Tier 1: SQLite Default
+
+```yaml
+backend: "sqlite"
+db_path: "membrane.db"
+```
+
+- Zero infrastructure
+- Confidence-based fallback for applicability
+- Single-process only
+
+### Tier 2: Postgres Concurrent
+
+```yaml
+backend: "postgres"
+postgres_dsn: "postgres://membrane:password@localhost/membrane"
+```
+
+- Concurrent writers
+- JSONB storage
+- Same retrieval semantics as tier 1
+
+### Tier 3: Postgres + Embeddings
+
+```yaml
+backend: "postgres"
+postgres_dsn: "postgres://membrane:password@localhost/membrane"
+embedding_endpoint: "https://api.openai.com/v1/embeddings"
+embedding_model: "text-embedding-3-small"
+embedding_dimensions: 1536
+```
+
+- Embedding-based applicability scoring
+- Semantic similarity search
+- pgvector integration
+
+### Tier 4: Full System with LLM
+
+```yaml
+backend: "postgres"
+postgres_dsn: "postgres://membrane:password@localhost/membrane"
+embedding_endpoint: "https://api.openai.com/v1/embeddings"
+embedding_model: "text-embedding-3-small"
+embedding_dimensions: 1536
+llm_endpoint: "https://api.openai.com/v1/chat/completions"
+llm_model: "gpt-5-mini"
+```
+
+- Full capabilities
+- LLM-backed episodic to semantic extraction
+- Asynchronous consolidation
+
+## Loading Configuration in Code
+
+### Go (Embedded)
+
+<CodeGroup>
+```go Default Config
+cfg := membrane.DefaultConfig()
+m, err := membrane.New(cfg)
+```
+
+```go From File
+cfg, err := membrane.LoadConfig("/etc/membrane/config.yaml")
+if err != nil {
+    log.Fatal(err)
+}
+m, err := membrane.New(cfg)
+```
+
+```go Programmatic
+cfg := membrane.DefaultConfig()
+cfg.DBPath = "my-agent.db"
+cfg.Backend = "postgres"
+cfg.PostgresDSN = os.Getenv("MEMBRANE_POSTGRES_DSN")
+cfg.DecayInterval = 30 * time.Minute
+cfg.DefaultSensitivity = "medium"
+
+m, err := membrane.New(cfg)
+```
+</CodeGroup>
+
+### TypeScript Client
+
+```typescript
+import { MembraneClient } from "@gustycube/membrane";
+
+const client = new MembraneClient("localhost:9090", {
+  apiKey: process.env.MEMBRANE_API_KEY,
+  tls: false,  // or provide TLS credentials
+});
+```
+
+### Python Client
+
+```python
+from membrane import MembraneClient
+import os
+
+client = MembraneClient(
+    "localhost:9090",
+    api_key=os.getenv("MEMBRANE_API_KEY"),
+    tls=False,
+)
+```
+
+## Production Configuration Example
+
+Complete production setup with security:
+
+```yaml production-config.yaml
+backend: "postgres"
+listen_addr: "0.0.0.0:9090"
+
+# Use environment variables for sensitive values
+# postgres_dsn: ""  # Set via MEMBRANE_POSTGRES_DSN
+# api_key: ""       # Set via MEMBRANE_API_KEY
+
+tls_cert_file: "/etc/membrane/certs/server.crt"
+tls_key_file: "/etc/membrane/certs/server.key"
+
+decay_interval: "1h"
+consolidation_interval: "6h"
+default_sensitivity: "low"
+selection_confidence_threshold: 0.7
+rate_limit_per_second: 100
+
+embedding_endpoint: "https://api.openai.com/v1/embeddings"
+embedding_model: "text-embedding-3-small"
+embedding_dimensions: 1536
+# embedding_api_key: ""  # Set via MEMBRANE_EMBEDDING_API_KEY
+
+llm_endpoint: "https://api.openai.com/v1/chat/completions"
+llm_model: "gpt-5-mini"
+# llm_api_key: ""  # Set via MEMBRANE_LLM_API_KEY
+```
+
+Environment variables:
+
+```bash
+export MEMBRANE_POSTGRES_DSN="postgres://membrane:$(cat /secrets/db-password)@db.example.com:5432/membrane?sslmode=require"
+export MEMBRANE_API_KEY="$(cat /secrets/api-key)"
+export MEMBRANE_EMBEDDING_API_KEY="$(cat /secrets/openai-key)"
+export MEMBRANE_LLM_API_KEY="$(cat /secrets/openai-key)"
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Daemon Deployment" icon="server" href="/guides/daemon-deployment">
+    Deploy Membrane as a production service
+  </Card>
+  <Card title="Embedded Usage" icon="code" href="/guides/embedded-usage">
+    Use Membrane as a Go library
+  </Card>
+  <Card title="Observability" icon="chart-line" href="/guides/observability">
+    Monitor metrics and health
+  </Card>
+  <Card title="Security" icon="shield" href="/advanced/security">
+    Detailed security configuration
+  </Card>
+</CardGroup>

@@ -1,0 +1,222 @@
+---
+title: API Overview
+description: Learn how to connect to Membrane's gRPC API and authenticate requests
+---
+
+## Introduction
+
+Membrane exposes a gRPC API with 15 methods organized into four categories:
+
+- **Ingestion** — Capture raw events, tool outputs, observations, outcomes, and working state
+- **Retrieval** — Query memory with trust-aware filtering and layered ordering
+- **Revision** — Supersede, fork, retract, merge, contest, reinforce, and penalize records
+- **Metrics** — Retrieve observability snapshots for memory growth, usefulness, and success rates
+
+The API uses protoc-generated service stubs with JSON-encoded payloads over protobuf `bytes` fields.
+
+## gRPC Service Definition
+
+The core service definition includes all 15 methods:
+
+```protobuf
+service MembraneService {
+    rpc IngestEvent(IngestEventRequest) returns (IngestResponse);
+    rpc IngestToolOutput(IngestToolOutputRequest) returns (IngestResponse);
+    rpc IngestObservation(IngestObservationRequest) returns (IngestResponse);
+    rpc IngestOutcome(IngestOutcomeRequest) returns (IngestResponse);
+    rpc IngestWorkingState(IngestWorkingStateRequest) returns (IngestResponse);
+    rpc Retrieve(RetrieveRequest) returns (RetrieveResponse);
+    rpc RetrieveByID(RetrieveByIDRequest) returns (MemoryRecordResponse);
+    rpc Supersede(SupersedeRequest) returns (MemoryRecordResponse);
+    rpc Fork(ForkRequest) returns (MemoryRecordResponse);
+    rpc Retract(RetractRequest) returns (RetractResponse);
+    rpc Merge(MergeRequest) returns (MemoryRecordResponse);
+    rpc Reinforce(ReinforceRequest) returns (ReinforceResponse);
+    rpc Penalize(PenalizeRequest) returns (PenalizeResponse);
+    rpc Contest(ContestRequest) returns (ContestResponse);
+    rpc GetMetrics(GetMetricsRequest) returns (MetricsResponse);
+}
+```
+
+## Connection Setup
+
+<CodeGroup>
+```typescript TypeScript
+import { MembraneClient } from "@gustycube/membrane";
+
+const client = new MembraneClient("localhost:9090", {
+  apiKey: process.env.MEMBRANE_API_KEY,
+  // Optional TLS configuration
+  tls: {
+    enabled: true,
+    cert: fs.readFileSync("./cert.pem"),
+    key: fs.readFileSync("./key.pem")
+  }
+});
+```
+
+```python Python
+from membrane import MembraneClient
+
+client = MembraneClient(
+    "localhost:9090",
+    api_key=os.environ["MEMBRANE_API_KEY"]
+)
+```
+
+```go Go
+import (
+    "google.golang.org/grpc"
+    "google.golang.org/grpc/credentials"
+    membranev1 "github.com/GustyCube/membrane/api/grpc/gen/membranev1"
+)
+
+conn, err := grpc.Dial(
+    "localhost:9090",
+    grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
+    grpc.WithPerRPCCredentials(apiKeyAuth{key: os.Getenv("MEMBRANE_API_KEY")}),
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer conn.Close()
+
+client := membranev1.NewMembraneServiceClient(conn)
+```
+</CodeGroup>
+
+## Authentication
+
+Membrane supports bearer token authentication via gRPC metadata:
+
+<Card title="API Key Authentication" icon="key">
+  Set the `authorization` metadata header to `Bearer YOUR_API_KEY` on all requests.
+</Card>
+
+### Setting API Key
+
+Configure the API key via:
+
+1. **Environment variable**: `MEMBRANE_API_KEY=your-key-here`
+2. **Configuration file**: `api_key: your-key-here` in `config.yaml`
+3. **Command line**: `./membraned --api-key your-key-here`
+
+<Warning>
+Store API keys in environment variables or secret managers. Never commit them to version control.
+</Warning>
+
+## Rate Limiting
+
+Membrane applies token bucket rate limiting with configurable requests per second:
+
+<ParamField path="rate_limit_per_second" type="number" default="100">
+  Maximum requests per second per client
+</ParamField>
+
+When rate limits are exceeded, the API returns a gRPC `RESOURCE_EXHAUSTED` error. Clients should implement exponential backoff:
+
+```typescript
+import { status } from "@grpc/grpc-js";
+
+async function retryWithBackoff(fn, maxRetries = 3) {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err.code === status.RESOURCE_EXHAUSTED && i < maxRetries - 1) {
+        await new Promise(resolve => setTimeout(resolve, Math.pow(2, i) * 1000));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+```
+
+## TLS/SSL Configuration
+
+For production deployments, enable TLS transport encryption:
+
+```yaml
+# config.yaml
+tls_cert_file: /path/to/cert.pem
+tls_key_file: /path/to/key.pem
+```
+
+```bash
+# Command line
+./membraned --tls-cert-file ./cert.pem --tls-key-file ./key.pem
+```
+
+## Error Handling
+
+Membrane returns standard gRPC status codes:
+
+| Code | Status | Meaning |
+|------|--------|----------|
+| 0 | OK | Success |
+| 3 | INVALID_ARGUMENT | Invalid request parameters |
+| 5 | NOT_FOUND | Record not found |
+| 7 | PERMISSION_DENIED | Trust context denies access |
+| 8 | RESOURCE_EXHAUSTED | Rate limit exceeded |
+| 13 | INTERNAL | Server error |
+| 14 | UNAVAILABLE | Service unavailable |
+| 16 | UNAUTHENTICATED | Missing or invalid API key |
+
+<CodeGroup>
+```typescript TypeScript
+try {
+  const record = await client.retrieveByID("record-id", trustContext);
+} catch (err) {
+  if (err.code === status.NOT_FOUND) {
+    console.error("Record not found");
+  } else if (err.code === status.PERMISSION_DENIED) {
+    console.error("Access denied by trust context");
+  } else {
+    console.error("Unexpected error:", err.message);
+  }
+}
+```
+
+```python Python
+from grpc import StatusCode
+
+try:
+    record = client.retrieve_by_id("record-id", trust_context)
+except grpc.RpcError as e:
+    if e.code() == StatusCode.NOT_FOUND:
+        print("Record not found")
+    elif e.code() == StatusCode.PERMISSION_DENIED:
+        print("Access denied by trust context")
+    else:
+        print(f"Unexpected error: {e.details()}")
+```
+</CodeGroup>
+
+## Data Encoding
+
+All payloads are JSON-encoded and passed as protobuf `bytes` fields. The API automatically handles serialization:
+
+- **Request**: Client libraries serialize request objects to JSON bytes
+- **Response**: Server returns JSON bytes, client libraries deserialize to typed objects
+
+<Note>
+The proto `bytes` fields are used as JSON containers to support dynamic payload schemas while maintaining gRPC type safety.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Ingestion API" icon="download" href="/api/ingestion">
+    Ingest events, tool outputs, observations, and outcomes
+  </Card>
+  <Card title="Retrieval API" icon="search" href="/api/retrieval">
+    Query memory with trust-aware filtering
+  </Card>
+  <Card title="Revision API" icon="rotate" href="/api/revision">
+    Supersede, fork, retract, and merge records
+  </Card>
+  <Card title="Metrics API" icon="chart-line" href="/api/metrics">
+    Monitor memory growth and retrieval usefulness
+  </Card>
+</CardGroup>

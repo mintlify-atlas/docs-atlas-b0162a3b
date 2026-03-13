@@ -1,0 +1,335 @@
+---
+title: 'Competence Memory'
+description: 'Procedural knowledge encoding how to achieve goals reliably'
+icon: 'brain-circuit'
+---
+
+## Overview
+
+Competence memory encodes procedural knowledge: how to achieve goals reliably under specific conditions. It represents "knowing how" rather than "knowing that".
+
+**Key Characteristics:**
+- Trigger-based activation (RFC 15A.9)
+- Step-by-step procedures (recipes)
+- Performance tracking for selection
+- Failure modes and fallback strategies
+- Tool requirements and dependencies
+
+## Use Cases
+
+- Encoding learned procedures from successful episodes
+- Automating repetitive tasks with known solutions
+- Handling common errors with proven recovery strategies
+- Selecting optimal procedures based on past performance
+- Adapting procedures through version management
+
+## Schema
+
+<ParamField path="kind" type="string" required>
+  Payload type identifier. Must be `"competence"`.
+</ParamField>
+
+<ParamField path="skill_name" type="string" required>
+  Name of the skill or procedure (e.g., `"debug_import_error"`, `"setup_nodejs_project"`).
+</ParamField>
+
+<ParamField path="triggers" type="array" required>
+  Defines when this competence applies.
+  
+  <Expandable title="Trigger properties">
+    <ResponseField name="signal" type="string" required>
+      Trigger signal such as error signature, intent label, or event pattern.
+      Examples: `"ImportError"`, `"intent:setup_project"`, `"test_failure"`
+    </ResponseField>
+    
+    <ResponseField name="conditions" type="object">
+      Additional matching conditions (implementation-defined keys).
+      Example: `{"language": "python", "package_manager": "pip"}`
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="recipe" type="array" required>
+  Ordered or conditional steps for executing the competence.
+  
+  <Expandable title="RecipeStep properties">
+    <ResponseField name="step" type="string" required>
+      Human-readable description of the step.
+    </ResponseField>
+    
+    <ResponseField name="tool" type="string">
+      Tool to use for this step (e.g., `"bash"`, `"read"`, `"grep"`).
+    </ResponseField>
+    
+    <ResponseField name="args_schema" type="object">
+      Expected arguments for the tool (schema definition).
+    </ResponseField>
+    
+    <ResponseField name="validation" type="string">
+      How to verify step success (e.g., `"exit_code == 0"`, `"file_exists"`).  
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="required_tools" type="array">
+  List of tools needed to execute this competence. Array of tool names.
+</ParamField>
+
+<ParamField path="failure_modes" type="array">
+  Documents known failure cases. Array of failure descriptions.
+</ParamField>
+
+<ParamField path="fallbacks" type="array">
+  Alternative steps when primary recipe fails. Array of fallback strategies.
+</ParamField>
+
+<ParamField path="performance" type="object">
+  Tracks success and failure statistics for competence selection.
+  
+  <Expandable title="PerformanceStats properties">
+    <ResponseField name="success_count" type="integer">
+      Number of successful uses.
+    </ResponseField>
+    
+    <ResponseField name="failure_count" type="integer">
+      Number of failed uses.
+    </ResponseField>
+    
+    <ResponseField name="success_rate" type="number">
+      Computed success rate (range: 0 to 1).
+    </ResponseField>
+    
+    <ResponseField name="avg_latency_ms" type="number">
+      Average execution time in milliseconds.
+    </ResponseField>
+    
+    <ResponseField name="last_used_at" type="timestamp">
+      When this competence was last used.
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="version" type="string">
+  Version identifier for this competence (e.g., `"1.2.0"`, `"2024-03-13"`).
+</ParamField>
+
+## Examples
+
+<CodeGroup>
+```json debug-import-error.json
+{
+  "kind": "competence",
+  "skill_name": "debug_python_import_error",
+  "triggers": [
+    {
+      "signal": "ImportError",
+      "conditions": {
+        "language": "python"
+      }
+    },
+    {
+      "signal": "ModuleNotFoundError",
+      "conditions": {
+        "language": "python"
+      }
+    }
+  ],
+  "recipe": [
+    {
+      "step": "Extract module name from error message",
+      "tool": "regex",
+      "args_schema": {
+        "pattern": "No module named '(.+)'"
+      },
+      "validation": "module_name extracted"
+    },
+    {
+      "step": "Check if module is in requirements.txt",
+      "tool": "grep",
+      "args_schema": {
+        "pattern": "${module_name}",
+        "file": "requirements.txt"
+      },
+      "validation": "found or not_found"
+    },
+    {
+      "step": "Install missing package",
+      "tool": "bash",
+      "args_schema": {
+        "command": "pip install ${module_name}"
+      },
+      "validation": "exit_code == 0"
+    },
+    {
+      "step": "Retry import to verify fix",
+      "validation": "import succeeds"
+    }
+  ],
+  "required_tools": ["bash", "grep", "regex"],
+  "failure_modes": [
+    "Module name not in PyPI",
+    "Network failure during install",
+    "Permission denied for pip install"
+  ],
+  "fallbacks": [
+    "Try pip install --user if permission denied",
+    "Check for typos in import statement",
+    "Search for alternative package names"
+  ],
+  "performance": {
+    "success_count": 42,
+    "failure_count": 3,
+    "success_rate": 0.933,
+    "avg_latency_ms": 2400,
+    "last_used_at": "2026-03-13T08:30:00Z"
+  },
+  "version": "1.0.0"
+}
+```
+
+```json setup-project.json
+{
+  "kind": "competence",
+  "skill_name": "setup_nodejs_project",
+  "triggers": [
+    {
+      "signal": "intent:setup_project",
+      "conditions": {
+        "language": "javascript",
+        "runtime": "node"
+      }
+    }
+  ],
+  "recipe": [
+    {
+      "step": "Initialize package.json",
+      "tool": "bash",
+      "args_schema": {
+        "command": "npm init -y"
+      },
+      "validation": "package.json exists"
+    },
+    {
+      "step": "Install common dependencies",
+      "tool": "bash",
+      "args_schema": {
+        "command": "npm install express dotenv"
+      },
+      "validation": "node_modules directory exists"
+    },
+    {
+      "step": "Create .gitignore",
+      "tool": "write",
+      "args_schema": {
+        "file": ".gitignore",
+        "content": "node_modules/\n.env\n.DS_Store"
+      },
+      "validation": ".gitignore exists"
+    },
+    {
+      "step": "Initialize git repository",
+      "tool": "bash",
+      "args_schema": {
+        "command": "git init"
+      },
+      "validation": ".git directory exists"
+    }
+  ],
+  "required_tools": ["bash", "write"],
+  "failure_modes": [
+    "npm not installed",
+    "git not installed",
+    "Insufficient disk space"
+  ],
+  "fallbacks": [
+    "Prompt user to install Node.js if npm missing",
+    "Skip git init if not required by user"
+  ],
+  "performance": {
+    "success_count": 127,
+    "failure_count": 2,
+    "success_rate": 0.984,
+    "avg_latency_ms": 5200,
+    "last_used_at": "2026-03-12T15:45:00Z"
+  },
+  "version": "2.1.0"
+}
+```
+</CodeGroup>
+
+## Lifecycle Rules
+
+### Learning and Evolution
+
+Competence is learned from successful episodes:
+
+1. **Pattern Recognition** - Identify recurring successful sequences in episodic memory
+2. **Abstraction** - Extract general procedure from specific instances
+3. **Trigger Definition** - Define when the competence applies
+4. **Validation** - Test competence on similar scenarios
+5. **Performance Tracking** - Update success/failure statistics over time
+
+### Versioning
+
+Competence evolves through versioning:
+- Minor improvements → increment version
+- Better success rate → replace old version
+- Context-specific variants → fork with different triggers
+- Failed competence → analyze and create improved version
+
+### Selection
+
+When multiple competences match:
+1. Filter by trigger match quality
+2. Check required tools availability
+3. Evaluate performance metrics (success rate, latency)
+4. Consider recency (last_used_at)
+5. Select highest-scoring competence
+
+## Best Practices
+
+<Card title="Trigger Specificity" icon="bullseye">
+  Make triggers specific enough to avoid false positives, but general enough to handle variations. Use conditions for fine-grained matching.
+</Card>
+
+<Card title="Step Granularity" icon="layer-group">
+  Keep recipe steps at appropriate granularity - each step should be atomic and verifiable. Break complex operations into multiple steps.
+</Card>
+
+<Card title="Validation Criteria" icon="check-circle">
+  Define clear validation for each step. This enables automatic verification and early failure detection.
+</Card>
+
+<Card title="Failure Documentation" icon="triangle-exclamation">
+  Document known failure modes as you encounter them. This helps with debugging and fallback strategy development.
+</Card>
+
+<Card title="Performance Tracking" icon="chart-line">
+  Always update performance statistics after execution. This data is critical for competence selection and improvement.
+</Card>
+
+<Card title="Tool Dependencies" icon="wrench">
+  Explicitly list required tools. This enables pre-flight checks and prevents mid-execution failures.
+</Card>
+
+## From Episodes to Competence
+
+The learning pipeline:
+
+```
+Episodic Memory (raw experience)
+     ↓
+Pattern Detection (recurring success)
+     ↓
+Procedure Extraction (abstraction)
+     ↓
+Competence Memory (reusable skill)
+     ↓
+Performance Tracking (refinement)
+```
+
+## Related
+
+- [Episodic Memory](/schemas/episodic) - Source of learned procedures
+- [Plan Graph](/schemas/plan-graph) - Complex multi-step solution structures
+- [Working Memory](/schemas/working) - Current execution context

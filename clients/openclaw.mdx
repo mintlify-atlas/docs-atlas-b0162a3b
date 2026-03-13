@@ -1,0 +1,388 @@
+---
+title: OpenClaw Plugin
+description: Bridge your OpenClaw agents to Membrane for episodic memory
+---
+
+The OpenClaw Membrane plugin provides seamless integration between [OpenClaw](https://github.com/openclaw/openclaw) AI agents and the Membrane memory substrate.
+
+## Features
+
+<CardGroup cols={2}>
+  <Card title="Auto-Ingestion" icon="database">
+    Automatically captures agent events, tool outputs, and observations into Membrane.
+  </Card>
+  
+  <Card title="Memory Search" icon="magnifying-glass">
+    Provides `membrane_search` tool for explicit episodic memory queries.
+  </Card>
+  
+  <Card title="Auto-Context" icon="brain">
+    Injects relevant memories before each agent turn for contextual awareness.
+  </Card>
+  
+  <Card title="Status Command" icon="circle-info">
+    Use `/membrane` to check connection status and memory statistics.
+  </Card>
+</CardGroup>
+
+## Installation
+
+Install in your OpenClaw extensions directory:
+
+```bash
+npm install @vainplex/openclaw-membrane
+```
+
+Or use [Brainplex](https://www.npmjs.com/package/brainplex) for automatic setup:
+
+```bash
+npx brainplex init  # Auto-detects and configures all plugins
+```
+
+**Prerequisites:**
+- A running [Membrane](https://github.com/GustyCube/membrane) instance (`membraned` daemon)
+- OpenClaw v0.10 or higher
+- Node.js 20+
+
+## Configuration
+
+Add the plugin to your OpenClaw config (`openclaw.yaml`):
+
+```yaml
+plugins:
+  entries:
+    openclaw-membrane:
+      enabled: true
+      config:
+        grpc_endpoint: "localhost:4222"
+        default_sensitivity: "low"
+        auto_context: true
+        context_limit: 5
+        min_salience: 0.3
+        context_types: ["episodic", "semantic", "competence"]
+```
+
+### Configuration Options
+
+<ParamField path="grpc_endpoint" type="string" default="localhost:4222">
+  Membrane gRPC daemon address
+</ParamField>
+
+<ParamField path="default_sensitivity" type="string" default="low">
+  Default sensitivity level for ingested events.
+  
+  Options: `public`, `low`, `medium`, `high`, `hyper`
+</ParamField>
+
+<ParamField path="auto_context" type="boolean" default="true">
+  Enable automatic memory injection before each agent turn
+</ParamField>
+
+<ParamField path="context_limit" type="integer" default="5">
+  Maximum number of memories to inject per turn
+</ParamField>
+
+<ParamField path="min_salience" type="number" default="0.3">
+  Minimum salience score threshold for retrieval (0.0-1.0)
+</ParamField>
+
+<ParamField path="context_types" type="array" default='["episodic", "semantic", "competence"]'>
+  Memory types to include in auto-context.
+  
+  Options: `episodic`, `working`, `semantic`, `competence`, `plan_graph`
+</ParamField>
+
+## Usage
+
+### Memory Search Tool
+
+Your agent can explicitly search episodic memory using the `membrane_search` tool:
+
+```javascript
+membrane_search("what happened in yesterday's meeting", { limit: 10 })
+```
+
+**Tool Parameters:**
+
+<ParamField path="query" type="string" required>
+  Natural language query to search memories
+</ParamField>
+
+<ParamField path="limit" type="integer" default="5">
+  Maximum number of results to return
+</ParamField>
+
+<ParamField path="memory_types" type="array">
+  Filter by memory types: `episodic`, `working`, `semantic`, `competence`, `plan_graph`
+</ParamField>
+
+<ParamField path="min_salience" type="number" default="0.3">
+  Minimum salience score threshold (0.0-1.0)
+</ParamField>
+
+**Example:**
+
+<CodeGroup>
+```javascript Basic Search
+membrane_search("authentication bugs we fixed last week", { limit: 5 })
+```
+
+```javascript Filtered Search
+membrane_search("database optimization strategies", {
+  limit: 10,
+  memory_types: ["semantic", "competence"],
+  min_salience: 0.5
+})
+```
+</CodeGroup>
+
+### Auto-Context Injection
+
+When `auto_context: true`, the plugin automatically retrieves relevant memories before each agent turn and injects them into the context.
+
+This gives agents implicit awareness of past interactions without requiring explicit tool calls.
+
+**How it works:**
+
+1. Before agent starts processing, plugin calls `retrieve()` with agent ID as query
+2. Filters by configured `context_types` and `min_salience`
+3. Formats top `context_limit` memories into readable text
+4. Injects into agent context as: `"Episodic memory from Membrane:\n1. [type] summary\n..."`
+
+### Status Command
+
+Check Membrane connection status and memory statistics:
+
+```text
+/membrane
+```
+
+**Example output:**
+
+```text
+Membrane: connected (localhost:4222) | 1,247 records | 3 memory types
+```
+
+## Architecture
+
+The plugin hooks into OpenClaw's lifecycle events:
+
+```text
+OpenClaw Agent
+     │
+     ├── after_agent_reply ──→ ingestEvent()
+     ├── after_tool_call ────→ ingestToolOutput()
+     ├── before_agent_start ─→ retrieve() → inject context
+     │
+     └── membrane_search ───→ retrieve() → return results
+                                  │
+                                  ▼
+                          Membrane (gRPC)
+                          ┌─────────────┐
+                          │  membraned   │
+                          │  SQLCipher   │
+                          │  Embeddings  │
+                          └─────────────┘
+```
+
+### Hook Behavior
+
+<Tabs>
+  <Tab title="after_agent_reply">
+    Ingests agent responses as episodic events.
+    
+    **Captured fields:**
+    - Event kind: hook name (`after_agent_reply`)
+    - Reference: session key + hook + timestamp
+    - Summary: extracted from event payload
+    - Tags: auto-generated from event metadata
+    - Sensitivity: configured `default_sensitivity`
+  </Tab>
+  
+  <Tab title="after_tool_call">
+    Ingests tool invocations as competence memories.
+    
+    **Captured fields:**
+    - Tool name
+    - Arguments (tool parameters)
+    - Result (tool output)
+    - Tags: includes tool name
+    - Sensitivity: configured `default_sensitivity`
+  </Tab>
+  
+  <Tab title="before_agent_start">
+    Retrieves and injects relevant memories into agent context.
+    
+    **Query:** `"context for agent {agentId}"`
+    
+    **Filters:**
+    - Memory types: `context_types`
+    - Minimum salience: `min_salience`
+    - Limit: `context_limit`
+  </Tab>
+</Tabs>
+
+## Plugin API
+
+The plugin exposes the `OpenClawMembranePlugin` class:
+
+### Class Methods
+
+<CodeGroup>
+```typescript activate
+activate(): void
+```
+
+```typescript deactivate
+deactivate(): void
+```
+
+```typescript handleEvent
+async handleEvent(event: OpenClawEvent): Promise<void>
+```
+
+```typescript search
+async search(
+  query: string,
+  options?: {
+    limit?: number;
+    memoryTypes?: string[];
+    minSalience?: number;
+  }
+): Promise<MemoryRecord[]>
+```
+
+```typescript getContext
+async getContext(agentId: string): Promise<string | null>
+```
+
+```typescript getStatus
+async getStatus(): Promise<{
+  connected: boolean;
+  endpoint: string;
+  metrics?: unknown;
+}>
+```
+</CodeGroup>
+
+### Event Mapping
+
+The plugin maps OpenClaw events to Membrane ingestion methods:
+
+| Event Type | Mapping | Memory Type |
+|------------|---------|-------------|
+| Tool call | `ingestToolOutput()` | `competence` |
+| Agent reply | `ingestEvent()` or `ingestObservation()` | `episodic` / `semantic` |
+| Other hooks | `ingestEvent()` | `episodic` |
+
+## Advanced Configuration
+
+### Custom Sensitivity Per Hook
+
+You can implement hook-specific sensitivity by extending the plugin:
+
+```typescript
+import { OpenClawMembranePlugin, mapSensitivity } from "@vainplex/openclaw-membrane";
+
+class CustomMembranePlugin extends OpenClawMembranePlugin {
+  async handleEvent(event: OpenClawEvent): Promise<void> {
+    // Override sensitivity for specific hooks
+    if (event.hook === "after_user_auth") {
+      event.sensitivity = "high";
+    }
+    return super.handleEvent(event);
+  }
+}
+```
+
+### TLS and Authentication
+
+The plugin inherits connection settings from the TypeScript client. Configure via environment or custom client initialization:
+
+```typescript
+import { MembraneClient } from "@gustycube/membrane";
+
+const client = new MembraneClient("membrane.example.com:443", {
+  tls: true,
+  tlsCaCertPath: "/path/to/ca.pem",
+  apiKey: process.env.MEMBRANE_API_KEY,
+});
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Plugin not connecting to Membrane">
+    1. Verify `membraned` is running: `membraned --help`
+    2. Check `grpc_endpoint` matches daemon address
+    3. Ensure no firewall blocking the gRPC port
+    4. Check logs: `/membrane` command shows connection status
+  </Accordion>
+  
+  <Accordion title="No memories being ingested">
+    1. Verify `enabled: true` in plugin config
+    2. Check hook registration: plugin should log activation
+    3. Ensure `default_sensitivity` is valid
+    4. Check daemon logs for ingestion errors
+  </Accordion>
+  
+  <Accordion title="Auto-context not working">
+    1. Verify `auto_context: true` in config
+    2. Check `context_types` includes relevant memory types
+    3. Lower `min_salience` threshold if no results
+    4. Increase `context_limit` if too few memories
+  </Accordion>
+  
+  <Accordion title="Memory search returning no results">
+    1. Wait for embeddings to be generated (async process)
+    2. Lower `min_salience` parameter
+    3. Try broader query terms
+    4. Verify memories were ingested: `/membrane` shows record count
+  </Accordion>
+</AccordionGroup>
+
+## Development
+
+Build and test the plugin:
+
+```bash
+cd clients/openclaw
+npm install
+npm run build
+npm test
+```
+
+### Plugin Schema
+
+The plugin follows OpenClaw's plugin schema (`openclaw.plugin.json`):
+
+```json
+{
+  "id": "openclaw-membrane",
+  "kind": "memory",
+  "version": "0.4.0",
+  "hooks": ["after_agent_reply", "after_tool_call", "before_agent_start"],
+  "tools": [{"name": "membrane_search", ...}],
+  "commands": [{"name": "membrane", ...}]
+}
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Tune Salience" icon="sliders">
+    Adjust `min_salience` to filter out low-relevance memories and reduce noise.
+  </Card>
+  
+  <Card title="Limit Context" icon="gauge-high">
+    Keep `context_limit` low (3-5) to avoid overwhelming agent context windows.
+  </Card>
+  
+  <Card title="Selective Types" icon="filter">
+    Configure `context_types` to include only relevant memory categories for your use case.
+  </Card>
+  
+  <Card title="Monitor Status" icon="chart-line">
+    Use `/membrane` regularly to check connection health and memory growth.
+  </Card>
+</CardGroup>

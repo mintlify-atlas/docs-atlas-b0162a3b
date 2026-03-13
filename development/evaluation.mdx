@@ -1,0 +1,370 @@
+---
+title: Evaluation
+description: Capability evaluations and metrics for Membrane
+---
+
+Membrane includes comprehensive evaluation targets to test specific capabilities and measure retrieval quality.
+
+## Evaluation Overview
+
+The evaluation suite consists of two parts:
+
+1. **Capability Evals** - Go tests that validate specific features
+2. **Vector E2E Metrics** - Python-based retrieval quality metrics with thresholds
+
+## Capability Evaluations
+
+Run targeted tests for specific capabilities:
+
+### All Capability Evals
+
+<CodeGroup>
+```bash Run All Evals
+make eval-all
+```
+
+```bash What It Runs
+go test ./tests -run TestEval
+./tools/eval/run.sh
+```
+</CodeGroup>
+
+### Individual Capability Targets
+
+<Card title="Available Evaluation Targets" icon="target">
+  Each target runs a specific subset of the evaluation suite:
+</Card>
+
+#### Memory Type Handling
+
+```bash
+make eval-typed
+```
+
+Validates handling of all memory types (episodic, semantic, working, competence, plan_graph).
+
+**Test:** `TestEvalTypedMemory`
+
+#### Revision Lifecycle
+
+```bash
+make eval-revision
+```
+
+Tests revision operations: supersede, fork, retract, merge, and contest.
+
+**Test:** `TestEvalRevisionLifecycle`
+
+#### Decay and Reinforcement
+
+```bash
+make eval-decay
+```
+
+Validates time-based salience decay and reinforcement behavior.
+
+**Test:** `TestEvalDecayAndReinforce`
+
+#### Trust Gating
+
+```bash
+make eval-trust
+```
+
+Tests trust-aware retrieval with sensitivity levels and redaction.
+
+**Test:** `TestEvalTrustGating`
+
+#### Competence Learning
+
+```bash
+make eval-competence
+```
+
+Validates competence record creation, success tracking, and selection.
+
+**Test:** `TestEvalCompetenceSelection`
+
+#### Plan Graph Operations
+
+```bash
+make eval-plan
+```
+
+Tests plan graph ingestion, retrieval, and applicability scoring.
+
+**Test:** `TestEvalPlanGraphSelection`
+
+#### Consolidation
+
+```bash
+make eval-consolidation
+```
+
+Validates episodic to semantic consolidation pipeline.
+
+**Test:** `TestEvalConsolidation`
+
+#### Metrics
+
+```bash
+make eval-metrics
+```
+
+Tests observability metrics collection and calculation.
+
+**Test:** `TestEvalMetrics`
+
+#### System Invariants
+
+```bash
+make eval-invariants
+```
+
+Validates core system invariants across ingestion, retrieval, revision, and trust operations.
+
+**Test:** `TestEval(Ingestion|Retrieval|Revision|Trust)`
+
+#### gRPC API Coverage
+
+```bash
+make eval-grpc
+```
+
+Tests all gRPC endpoints for correct behavior and error handling.
+
+**Test:** `TestEvalGRPC`
+
+### Vector Evaluation
+
+The basic vector evaluation target is an alias:
+
+```bash
+make eval-vector  # Same as make eval
+```
+
+## Vector E2E Metrics
+
+The vector end-to-end evaluation measures retrieval quality using standard IR metrics.
+
+### Running Vector Evals
+
+```bash
+make eval
+```
+
+Or directly:
+
+```bash
+./tools/eval/run.sh
+```
+
+### Prerequisites
+
+Install Python dependencies:
+
+```bash
+python3 -m pip install -r tools/eval/requirements.txt
+```
+
+**Required packages:**
+- `sentence-transformers==2.7.0`
+- `numpy==1.26.4`
+
+<Note>
+  If Python dependencies are missing, the eval script will gracefully skip with a message.
+</Note>
+
+### Metrics and Thresholds
+
+The evaluation enforces minimum thresholds for four key metrics:
+
+| Metric | Default Threshold | Environment Variable |
+|--------|------------------|---------------------|
+| **Recall@k** | 0.90 | `MEMBRANE_EVAL_MIN_RECALL` |
+| **Precision@k** | 0.20 | `MEMBRANE_EVAL_MIN_PRECISION` |
+| **MRR@k** | 0.90 | `MEMBRANE_EVAL_MIN_MRR` |
+| **NDCG@k** | 0.90 | `MEMBRANE_EVAL_MIN_NDCG` |
+
+<Card title="Metric Definitions" icon="chart-bar">
+  - **Recall@k**: Fraction of relevant records retrieved in top-k results
+  - **Precision@k**: Fraction of retrieved records that are relevant
+  - **MRR@k**: Mean Reciprocal Rank of first relevant result
+  - **NDCG@k**: Normalized Discounted Cumulative Gain, rewards highly ranked relevant results
+</Card>
+
+### Customizing Thresholds
+
+Override thresholds via environment variables:
+
+```bash
+MEMBRANE_EVAL_MIN_RECALL=0.95 \
+MEMBRANE_EVAL_MIN_PRECISION=0.25 \
+MEMBRANE_EVAL_MIN_MRR=0.92 \
+MEMBRANE_EVAL_MIN_NDCG=0.92 \
+make eval
+```
+
+### Latest Results
+
+Local run (Feb 5, 2026):
+
+<Card title="Test Results" icon="check-circle">
+  **Unit/Integration:** 22 top-level eval tests + 7 subtests = 29 test cases, 0 failures (~0.40s)
+  
+  **Vector E2E:** 35 records, 18 queries
+  - Recall@k: **1.000** (threshold: 0.90)
+  - Precision@k: **0.267** (threshold: 0.20)
+  - MRR@k: **0.956** (threshold: 0.90)
+  - NDCG@k: **0.955** (threshold: 0.90)
+</Card>
+
+## Observability Metrics
+
+Membrane exposes runtime metrics via the `GetMetrics` gRPC endpoint.
+
+### Metric Categories
+
+#### Record Statistics
+
+```json
+{
+  "total_records": 142,
+  "records_by_type": {
+    "episodic": 80,
+    "semantic": 35,
+    "competence": 15,
+    "plan_graph": 7,
+    "working": 5
+  },
+  "active_records": 130,
+  "pinned_records": 3
+}
+```
+
+#### Salience and Confidence
+
+```json
+{
+  "avg_salience": 0.62,
+  "avg_confidence": 0.78,
+  "salience_distribution": {
+    "0.0-0.2": 12,
+    "0.2-0.4": 18,
+    "0.4-0.6": 30,
+    "0.6-0.8": 45,
+    "0.8-1.0": 37
+  }
+}
+```
+
+#### Behavioral Metrics
+
+```json
+{
+  "memory_growth_rate": 0.15,
+  "retrieval_usefulness": 0.42,
+  "competence_success_rate": 0.85,
+  "plan_reuse_frequency": 2.3,
+  "revision_rate": 0.08,
+  "total_audit_entries": 890
+}
+```
+
+### Key Metric Definitions
+
+<Steps>
+  <Step title="Memory Growth Rate">
+    Fraction of records created in the last 24 hours. Indicates ingestion velocity.
+  </Step>
+
+  <Step title="Retrieval Usefulness">
+    Ratio of reinforce actions to total audit entries. Measures how often retrieved records are actually useful.
+  </Step>
+
+  <Step title="Competence Success Rate">
+    Average success rate across all competence records. Tracks learned procedure effectiveness.
+  </Step>
+
+  <Step title="Plan Reuse Frequency">
+    Average execution count across plan graph records. Indicates plan template reusability.
+  </Step>
+
+  <Step title="Revision Rate">
+    Fraction of audit entries that are revisions (supersede, fork, merge). Measures knowledge refinement activity.
+  </Step>
+</Steps>
+
+### Accessing Metrics Programmatically
+
+<CodeGroup>
+```go Go
+metrics, err := m.GetMetrics(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+fmt.Printf("Total records: %d\n", metrics.TotalRecords)
+fmt.Printf("Retrieval usefulness: %.2f\n", metrics.RetrievalUsefulness)
+```
+
+```typescript TypeScript
+const metrics = await client.getMetrics();
+console.log(`Total records: ${metrics.total_records}`);
+console.log(`Retrieval usefulness: ${metrics.retrieval_usefulness}`);
+```
+
+```python Python
+metrics = client.get_metrics()
+print(f"Total records: {metrics['total_records']}")
+print(f"Retrieval usefulness: {metrics['retrieval_usefulness']}")
+```
+</CodeGroup>
+
+## Regression Testing Strategy
+
+<Note>
+  Treat recall tests as scenario-level regression guards rather than universal benchmarks. Recall depends on:
+  - Ingestion quality
+  - Trust filter configuration
+  - Reinforcement behavior
+  - Decay settings
+</Note>
+
+### Best Practices
+
+1. **Run `make eval-all`** before submitting PRs to catch regressions
+2. **Monitor metric trends** over time, not just absolute values
+3. **Adjust thresholds** based on your deployment tier and use case
+4. **Add new eval tests** when implementing new capabilities
+
+## Embedding-Backed Evaluation
+
+When using Postgres + pgvector (tier 3), Membrane uses embedding similarity for competence and plan graph applicability scoring.
+
+### Configuration
+
+Enable embedding-backed retrieval:
+
+```yaml
+backend: "postgres"
+postgres_dsn: "postgres://membrane:membrane@localhost:5432/membrane?sslmode=disable"
+embedding_endpoint: "https://api.openai.com/v1/embeddings"
+embedding_model: "text-embedding-3-small"
+embedding_dimensions: 1536
+embedding_api_key: "${MEMBRANE_EMBEDDING_API_KEY}"
+```
+
+<Card title="Tier Behavior" icon="layer-group">
+  - **Tier 1 (SQLite)**: Confidence-only fallback
+  - **Tier 2 (Postgres)**: Same as tier 1
+  - **Tier 3 (Postgres + pgvector)**: Embedding-based applicability
+  - **Tier 4 (+ LLM)**: Tier 3 + LLM semantic extraction
+</Card>
+
+## Next Steps
+
+<Card title="Related Documentation" icon="book">
+  - [Testing Guide](/development/testing) - Core test suite
+  - [Contributing](/development/contributing) - Development workflow
+  - [Configuration](/guides/configuration) - Threshold tuning
+</Card>

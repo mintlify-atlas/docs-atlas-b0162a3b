@@ -1,0 +1,306 @@
+---
+title: Architecture
+description: Understanding Membrane's three-plane architecture, deployment tiers, and storage model
+---
+
+Membrane is designed as a long-lived service or embedded library that provides structured, revisable memory for agentic systems. The architecture is organized into three logical planes that work together to provide automatic learning, decay, and consolidation.
+
+## Three-Plane Architecture
+
+Membrane's architecture separates concerns into three distinct planes:
+
+<CardGroup cols={3}>
+  <Card title="Ingestion Plane" icon="arrow-down">
+    Receives events, tool outputs, observations, and working state, converting them into candidate memory records.
+  </Card>
+  <Card title="Policy Plane" icon="shield">
+    Classifies candidates, assigns lifecycle metadata (sensitivity, decay curves, scope), and determines storage placement.
+  </Card>
+  <Card title="Storage & Retrieval" icon="database">
+    Persists memory records, enforces decay and revision operations, serves trust-aware retrieval queries.
+  </Card>
+</CardGroup>
+
+```
+┌──────────────────┐     ┌──────────────────┐     ┌──────────────────────┐
+│  Ingestion Plane │────▶│   Policy Plane   │────▶│ Storage & Retrieval  │
+└──────────────────┘     └──────────────────┘     └──────────────────────┘
+         │                        │                         │
+    Events, tool            Classification,            SQLCipher (encrypted),
+    outputs, obs.,          sensitivity,               audit trails,
+    working state           decay profiles             trust-gated access
+```
+
+These planes may be co-located in a single process or separated into services depending on deployment requirements.
+
+## Storage Model
+
+Membrane uses a carefully designed storage architecture that separates authoritative metadata from payload storage:
+
+### Authoritative Store
+
+The **authoritative store** is the source of truth for:
+- Memory record metadata (ID, type, sensitivity, confidence, salience)
+- Lifecycle state and decay parameters
+- Revision chains and relations between records
+- Audit history for all operations
+
+<Note>
+  A relational database (PostgreSQL or SQLite) is the authoritative store. This ensures atomic revision operations and enforceable invariants.
+</Note>
+
+### Storage Components
+
+<Tabs>
+  <Tab title="Metadata Store">
+    Stores `MemoryRecord` lifecycle fields including:
+    - Globally unique identifiers
+    - Memory type and sensitivity classification
+    - Confidence and salience scores
+    - Creation and update timestamps
+    - Decay profiles and reinforcement history
+    - Provenance links to source events
+    
+    **Implementation:** Relational schema (recommended)
+  </Tab>
+  <Tab title="Content Store">
+    Stores structured payloads conforming to type-specific schemas:
+    - `EpisodicPayload`: timelines, tool graphs, environment snapshots
+    - `WorkingPayload`: task state, constraints, next actions
+    - `SemanticPayload`: subject-predicate-object triples with validity
+    - `CompetencePayload`: triggers, recipes, performance stats
+    - `PlanGraphPayload`: nodes, edges, constraints, metrics
+    
+    **Implementation:** JSON or binary-encoded structured formats
+  </Tab>
+  <Tab title="Vector Index">
+    Optional acceleration layer for semantic similarity search:
+    - Used for embedding-based retrieval
+    - NOT the source of truth
+    - Updated asynchronously after authoritative store changes
+    - Supports competence and plan graph applicability scoring
+    
+    **Implementation:** pgvector extension (when using Postgres backend)
+  </Tab>
+  <Tab title="Relationship Store">
+    Represents graph edges between `MemoryRecords`:
+    - `supersedes`: replacement chains
+    - `derived_from`: forking and merging
+    - `contested_by`: conflicting evidence
+    - `supports` / `contradicts`: evidence relationships
+    
+    **Implementation:** Stored in authoritative relational schema
+  </Tab>
+</Tabs>
+
+### Storage Philosophy
+
+<Warning>
+  Membrane explicitly distinguishes between storage engines and the memory system. Learning semantics are implemented in application logic layered atop proven storage systems, NOT encoded directly into a database.
+</Warning>
+
+The memory system relies on:
+- **Atomic transactions** for revision operations (supersede, fork, retract)
+- **Enforceable invariants** (uniqueness of active semantic facts per condition set)
+- **Durable audit trails** for all state transitions
+- **Deterministic deletion** and decay behavior
+
+## Deployment Tiers
+
+Membrane supports four deployment tiers with increasing capabilities:
+
+<Tabs>
+  <Tab title="Tier 1: SQLite">
+    **Zero-infrastructure default**
+    
+    - Backend: SQLite with SQLCipher encryption
+    - Embedding: None (confidence-based fallback)
+    - LLM: None
+    - Use case: Embedded agents, development, single-user systems
+    
+    ```bash
+    ./bin/membraned --db membrane.db
+    ```
+  </Tab>
+  <Tab title="Tier 2: Postgres">
+    **Concurrent deployments**
+    
+    - Backend: PostgreSQL with JSONB storage
+    - Embedding: None (same retrieval semantics as Tier 1)
+    - LLM: None
+    - Use case: Multi-agent systems, team deployments
+    
+    ```bash
+    ./bin/membraned --postgres-dsn postgres://membrane:pass@localhost:5432/membrane
+    ```
+  </Tab>
+  <Tab title="Tier 3: Postgres + pgvector">
+    **Embedding-enhanced retrieval**
+    
+    - Backend: PostgreSQL with pgvector extension
+    - Embedding: Yes (via API endpoint)
+    - LLM: None
+    - Use case: Large-scale deployments requiring semantic similarity
+    
+    Enables:
+    - Embedding-based applicability scoring for competence records
+    - Plan graph selection via semantic similarity
+    - Vector-accelerated retrieval
+  </Tab>
+  <Tab title="Tier 4: Full System">
+    **Complete learning pipeline**
+    
+    - Backend: PostgreSQL with pgvector
+    - Embedding: Yes
+    - LLM: Yes (for semantic extraction)
+    - Use case: Production agentic systems with automatic learning
+    
+    Adds:
+    - LLM-backed episodic-to-semantic extraction
+    - Asynchronous consolidation pipeline
+    - Structured fact extraction from raw experience
+  </Tab>
+</Tabs>
+
+## Process Model
+
+Membrane runs as either:
+
+1. **Long-lived daemon** exposing gRPC API (default)
+2. **Embedded library** within agent runtime
+
+### Service Components
+
+The system exposes these core services:
+
+| Service | Purpose | API Methods |
+|---------|---------|-------------|
+| **Ingestion** | Accept events, observations, outcomes | `IngestEvent`, `IngestToolOutput`, `IngestObservation`, `IngestOutcome`, `IngestWorkingState` |
+| **Retrieval** | Layered, trust-gated memory access | `Retrieve`, `RetrieveByID` |
+| **Revision** | Atomic knowledge updates | `Supersede`, `Fork`, `Retract`, `Merge`, `Contest` |
+| **Salience** | Decay and reinforcement | `Reinforce`, `Penalize` (internal: `ApplyDecay`, `Prune`) |
+| **Metrics** | Observability and diagnostics | `GetMetrics` |
+
+### Background Jobs
+
+Three background jobs run periodically:
+
+<Tabs>
+  <Tab title="Decay Job">
+    **Default interval:** 1 hour
+    
+    Applies time-based salience decay using exponential curves:
+    
+    ```go
+    // From pkg/decay/curves.go
+    func Exponential(currentSalience, elapsedSeconds float64, profile schema.DecayProfile) float64 {
+        halfLife := float64(profile.HalfLifeSeconds)
+        if halfLife <= 0 {
+            return math.Max(currentSalience, profile.MinSalience)
+        }
+        decayed := currentSalience * math.Exp(-elapsedSeconds*math.Log(2)/halfLife)
+        return math.Max(decayed, profile.MinSalience)
+    }
+    ```
+    
+    Skips pinned records.
+  </Tab>
+  <Tab title="Pruning Job">
+    **Runs with decay job**
+    
+    Deletes records with `auto_prune` policy whose salience has reached floor:
+    
+    ```go
+    // From pkg/decay/decay.go
+    func (s *Service) Prune(ctx context.Context) (int, error) {
+        // Skip pinned records
+        // Skip if deletion policy is not auto_prune
+        // Prune if salience <= MinSalience AND salience < 0.001
+    }
+    ```
+    
+    Adds audit entry documenting auto-prune action.
+  </Tab>
+  <Tab title="Consolidation Job">
+    **Default interval:** 6 hours
+    
+    Runs five consolidation pipelines in sequence:
+    
+    1. **Episodic compression:** Reduces salience of old episodic records (>24h)
+    2. **Semantic extraction:** Promotes observations to semantic facts
+    3. **LLM extraction:** Converts episodic traces to typed semantic facts (Tier 4 only)
+    4. **Competence extraction:** Identifies repeated successful tool patterns
+    5. **Plan graph extraction:** Builds reusable solution graphs from episodes
+  </Tab>
+</Tabs>
+
+## Security Model
+
+Membrane implements defense-in-depth security:
+
+<CardGroup cols={2}>
+  <Card title="Encryption at Rest" icon="lock">
+    - SQLCipher with `PRAGMA key` for SQLite
+    - Column-level encryption for sensitive payloads (optional)
+    - Environment variable: `MEMBRANE_ENCRYPTION_KEY`
+  </Card>
+  <Card title="TLS Transport" icon="shield-halved">
+    - Optional TLS for gRPC connections
+    - Configure via `tls_cert_file` and `tls_key_file`
+    - Client certificate validation supported
+  </Card>
+  <Card title="Authentication" icon="key">
+    - Bearer token API key via `authorization` metadata
+    - Environment variable: `MEMBRANE_API_KEY`
+    - Per-request authentication for gRPC methods
+  </Card>
+  <Card title="Rate Limiting" icon="gauge">
+    - Token bucket limiter
+    - Configurable via `rate_limit_per_second`
+    - Default: 100 requests/second
+  </Card>
+</CardGroup>
+
+### Trust-Aware Retrieval
+
+Retrieval is conditioned on `TrustContext`:
+
+```go
+// From pkg/retrieval/trust.go
+type TrustContext struct {
+    MaxSensitivity schema.Sensitivity
+    Authenticated  bool
+    ActorID        string
+    Scopes         []string
+}
+
+func (tc *TrustContext) Allows(record *schema.MemoryRecord) bool {
+    // Check sensitivity: record sensitivity must be <= max allowed
+    // Check scope: if scopes specified, record scope must match
+}
+```
+
+Records exceeding trust level are filtered. Records exactly one level above may be returned in redacted form (metadata only, no payload).
+
+## Design Guarantees
+
+<Note>
+  A conforming Membrane implementation MUST guarantee:
+  
+  - **Automatic memory creation** without user approval
+  - **Revisability** of all non-episodic memory
+  - **Support for multiple competing procedures** and facts
+  - **Context-sensitive selection** rather than forced unification
+  - **Safe deletion via decay** rather than hard loss
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Memory Types" icon="shapes" href="/concepts/memory-types">
+    Explore the five memory types and their schemas
+  </Card>
+  <Card title="Revision Operations" icon="code-branch" href="/concepts/revision-operations">
+    Learn how to supersede, fork, and merge knowledge
+  </Card>
+</CardGroup>

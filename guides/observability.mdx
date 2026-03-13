@@ -1,0 +1,531 @@
+---
+title: Observability
+description: Monitor Membrane metrics, memory growth, and retrieval effectiveness
+---
+
+Membrane exposes detailed metrics about memory substrate health, retrieval usefulness, and learning behavior through the `GetMetrics` endpoint.
+
+## Metrics Endpoint
+
+The `GetMetrics` method returns a point-in-time snapshot of all substrate metrics.
+
+### Go (Embedded)
+
+```go
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+
+    "github.com/GustyCube/membrane/pkg/membrane"
+)
+
+func main() {
+    cfg := membrane.DefaultConfig()
+    m, _ := membrane.New(cfg)
+    defer m.Stop()
+
+    ctx := context.Background()
+    m.Start(ctx)
+
+    // Collect metrics
+    snapshot, err := m.GetMetrics(ctx)
+    if err != nil {
+        panic(err)
+    }
+
+    // Pretty print
+    data, _ := json.MarshalIndent(snapshot, "", "  ")
+    fmt.Println(string(data))
+}
+```
+
+### TypeScript Client
+
+```typescript
+import { MembraneClient } from "@gustycube/membrane";
+
+const client = new MembraneClient("localhost:9090", {
+  apiKey: process.env.MEMBRANE_API_KEY,
+});
+
+const metrics = await client.getMetrics();
+console.log(JSON.stringify(metrics, null, 2));
+
+client.close();
+```
+
+### Python Client
+
+```python
+from membrane import MembraneClient
+import json
+
+client = MembraneClient("localhost:9090", api_key=os.getenv("MEMBRANE_API_KEY"))
+
+metrics = client.get_metrics()
+print(json.dumps(metrics.to_dict(), indent=2))
+```
+
+## Metrics Snapshot
+
+Here's an example response from `GetMetrics`:
+
+```json
+{
+  "collected_at": "2026-03-13T10:30:00Z",
+  "total_records": 142,
+  "records_by_type": {
+    "episodic": 80,
+    "semantic": 35,
+    "competence": 15,
+    "plan_graph": 7,
+    "working": 5
+  },
+  "avg_salience": 0.62,
+  "avg_confidence": 0.78,
+  "salience_distribution": {
+    "0.0-0.2": 12,
+    "0.2-0.4": 18,
+    "0.4-0.6": 30,
+    "0.6-0.8": 45,
+    "0.8-1.0": 37
+  },
+  "active_records": 130,
+  "pinned_records": 3,
+  "total_audit_entries": 890,
+  "memory_growth_rate": 0.15,
+  "retrieval_usefulness": 0.42,
+  "competence_success_rate": 0.85,
+  "plan_reuse_frequency": 2.3,
+  "revision_rate": 0.08
+}
+```
+
+## Metrics Definitions
+
+### Basic Counters
+
+#### `total_records`
+
+- **Type:** `int`
+- **Description:** Total number of memory records in the substrate
+
+#### `records_by_type`
+
+- **Type:** `map[string]int`
+- **Description:** Breakdown of records by memory type
+- **Keys:** `episodic`, `working`, `semantic`, `competence`, `plan_graph`
+
+#### `active_records`
+
+- **Type:** `int`
+- **Description:** Count of records with `salience > 0`
+- **Use:** Track how much memory is still considered useful
+
+#### `pinned_records`
+
+- **Type:** `int`
+- **Description:** Count of records with `lifecycle.pinned = true`
+- **Use:** Pinned records never decay or get auto-pruned
+
+#### `total_audit_entries`
+
+- **Type:** `int`
+- **Description:** Total audit log entries across all records
+- **Use:** Track system activity and revision frequency
+
+### Salience Metrics
+
+#### `avg_salience`
+
+- **Type:** `float64`
+- **Range:** `[0, +inf)`
+- **Description:** Mean salience across all records
+- **Interpretation:**
+  - `< 0.3`: Memory is mostly stale
+  - `0.3 - 0.7`: Healthy mix of old and recent
+  - `> 0.7`: Memory is fresh and reinforced
+
+#### `salience_distribution`
+
+- **Type:** `map[string]int`
+- **Description:** Histogram of salience values in buckets
+- **Buckets:** `0.0-0.2`, `0.2-0.4`, `0.4-0.6`, `0.6-0.8`, `0.8-1.0`
+
+<Note>
+A healthy distribution shows most records in the middle buckets, with some high-salience records from reinforcement.
+</Note>
+
+### Confidence Metrics
+
+#### `avg_confidence`
+
+- **Type:** `float64`
+- **Range:** `[0, 1]`
+- **Description:** Mean epistemic confidence across all records
+- **Interpretation:**
+  - `< 0.5`: Low confidence, needs more evidence
+  - `0.5 - 0.8`: Moderate confidence
+  - `> 0.8`: High confidence, well-supported
+
+### Behavioral Metrics (RFC 15.10)
+
+#### `memory_growth_rate`
+
+- **Type:** `float64`
+- **Range:** `[0, 1]`
+- **Formula:** `records_created_last_24h / total_records`
+- **Description:** Fraction of memory created in the last 24 hours
+- **Interpretation:**
+  - `< 0.05`: Low activity, agent is mostly dormant
+  - `0.05 - 0.20`: Healthy growth
+  - `> 0.20`: High activity, may need consolidation tuning
+
+#### `retrieval_usefulness`
+
+- **Type:** `float64`
+- **Range:** `[0, 1]`
+- **Formula:** `reinforce_audit_entries / total_audit_entries`
+- **Description:** Ratio of reinforce actions to total audit entries
+- **Interpretation:**
+  - `< 0.2`: Most retrieved memory is not useful
+  - `0.2 - 0.5`: Moderate usefulness
+  - `> 0.5`: Memory is highly relevant and actionable
+
+<Note>
+Low retrieval usefulness indicates poor retrieval quality or insufficient reinforcement loops.
+</Note>
+
+#### `competence_success_rate`
+
+- **Type:** `float64`
+- **Range:** `[0, 1]`
+- **Description:** Average success rate across all competence records
+- **Interpretation:**
+  - `< 0.5`: Agent is still learning, many failed procedures
+  - `0.5 - 0.8`: Competence is improving
+  - `> 0.8`: Agent has mastered common procedures
+
+#### `plan_reuse_frequency`
+
+- **Type:** `float64`
+- **Range:** `[0, +inf)`
+- **Description:** Average execution count across plan graph records
+- **Interpretation:**
+  - `< 1.5`: Plans are rarely reused
+  - `1.5 - 3.0`: Good plan reuse
+  - `> 3.0`: High reuse, agent leverages past solutions
+
+#### `revision_rate`
+
+- **Type:** `float64`
+- **Range:** `[0, 1]`
+- **Formula:** `revision_audit_entries / total_audit_entries`
+- **Description:** Fraction of audit entries that are revisions (supersede, fork, merge)
+- **Interpretation:**
+  - `< 0.05`: Memory is mostly static
+  - `0.05 - 0.15`: Healthy revision activity
+  - `> 0.15`: High churn, may indicate unstable knowledge
+
+## Monitoring Dashboards
+
+### Prometheus Exporter
+
+Create a Prometheus exporter that polls `GetMetrics`:
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "net/http"
+    "time"
+
+    "github.com/GustyCube/membrane/pkg/membrane"
+    "github.com/prometheus/client_golang/prometheus"
+    "github.com/prometheus/client_golang/prometheus/promhttp"
+)
+
+var (
+    totalRecords = prometheus.NewGauge(prometheus.GaugeOpts{
+        Name: "membrane_total_records",
+        Help: "Total number of memory records",
+    })
+    avgSalience = prometheus.NewGauge(prometheus.GaugeOpts{
+        Name: "membrane_avg_salience",
+        Help: "Average salience across all records",
+    })
+    retrievalUsefulness = prometheus.NewGauge(prometheus.GaugeOpts{
+        Name: "membrane_retrieval_usefulness",
+        Help: "Ratio of reinforce actions to total audit entries",
+    })
+    competenceSuccessRate = prometheus.NewGauge(prometheus.GaugeOpts{
+        Name: "membrane_competence_success_rate",
+        Help: "Average success rate across competence records",
+    })
+)
+
+func init() {
+    prometheus.MustRegister(totalRecords)
+    prometheus.MustRegister(avgSalience)
+    prometheus.MustRegister(retrievalUsefulness)
+    prometheus.MustRegister(competenceSuccessRate)
+}
+
+func main() {
+    cfg := membrane.DefaultConfig()
+    cfg.DBPath = "membrane.db"
+
+    m, err := membrane.New(cfg)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer m.Stop()
+
+    ctx := context.Background()
+    m.Start(ctx)
+
+    // Update metrics every 30 seconds
+    go func() {
+        ticker := time.NewTicker(30 * time.Second)
+        defer ticker.Stop()
+
+        for range ticker.C {
+            snapshot, err := m.GetMetrics(ctx)
+            if err != nil {
+                log.Printf("Failed to collect metrics: %v", err)
+                continue
+            }
+
+            totalRecords.Set(float64(snapshot.TotalRecords))
+            avgSalience.Set(snapshot.AvgSalience)
+            retrievalUsefulness.Set(snapshot.RetrievalUsefulness)
+            competenceSuccessRate.Set(snapshot.CompetenceSuccessRate)
+        }
+    }()
+
+    http.Handle("/metrics", promhttp.Handler())
+    log.Println("Prometheus exporter listening on :2112")
+    log.Fatal(http.ListenAndServe(":2112", nil))
+}
+```
+
+### Grafana Dashboard
+
+Create a Grafana dashboard with these panels:
+
+<Steps>
+  <Step title="Memory Growth">
+    ```promql
+    membrane_total_records
+    rate(membrane_total_records[5m])
+    ```
+  </Step>
+
+  <Step title="Salience Health">
+    ```promql
+    membrane_avg_salience
+    ```
+  </Step>
+
+  <Step title="Retrieval Effectiveness">
+    ```promql
+    membrane_retrieval_usefulness
+    membrane_competence_success_rate
+    ```
+  </Step>
+
+  <Step title="Memory Distribution">
+    ```promql
+    membrane_records_by_type{type="episodic"}
+    membrane_records_by_type{type="semantic"}
+    membrane_records_by_type{type="competence"}
+    ```
+  </Step>
+</Steps>
+
+## Alerting
+
+### Low Retrieval Usefulness
+
+```yaml
+alert: LowRetrievalUsefulness
+expr: membrane_retrieval_usefulness < 0.2
+for: 1h
+annotations:
+  summary: "Retrieval usefulness dropped below 20%"
+  description: "Memory is not being reinforced. Check reinforcement loops."
+```
+
+### High Memory Growth
+
+```yaml
+alert: HighMemoryGrowth
+expr: rate(membrane_total_records[1h]) > 100
+for: 30m
+annotations:
+  summary: "Memory growing rapidly"
+  description: "More than 100 records created per hour. Check ingestion rate."
+```
+
+### Low Competence Success
+
+```yaml
+alert: LowCompetenceSuccess
+expr: membrane_competence_success_rate < 0.5
+for: 2h
+annotations:
+  summary: "Competence success rate below 50%"
+  description: "Agent is struggling with learned procedures. Review competence records."
+```
+
+## Logging
+
+The daemon logs key events to stdout:
+
+```
+membraned: listening on :9090
+membraned: decay scheduler started (interval=1h0m0s)
+membraned: consolidation scheduler started (interval=6h0m0s)
+membraned: received signal terminated, shutting down
+membraned: shutdown complete
+```
+
+### Structured Logging
+
+For production, consider adding structured logging:
+
+```go
+import "github.com/sirupsen/logrus"
+
+log := logrus.New()
+log.SetFormatter(&logrus.JSONFormatter{})
+log.WithFields(logrus.Fields{
+    "total_records": snapshot.TotalRecords,
+    "avg_salience":  snapshot.AvgSalience,
+}).Info("Metrics collected")
+```
+
+## Health Checks
+
+### gRPC Health Endpoint
+
+The daemon automatically registers a gRPC health check:
+
+```bash
+grpc-health-probe -addr=localhost:9090
+```
+
+### Custom Health Check
+
+Check if metrics can be retrieved:
+
+```go
+func healthCheck(m *membrane.Membrane) error {
+    ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+    defer cancel()
+
+    _, err := m.GetMetrics(ctx)
+    return err
+}
+```
+
+## Performance Monitoring
+
+### Query Latency
+
+Track retrieval latency:
+
+```go
+start := time.Now()
+resp, err := m.Retrieve(ctx, req)
+latency := time.Since(start)
+
+if latency > 500*time.Millisecond {
+    log.Printf("Slow retrieval: %v", latency)
+}
+```
+
+### Memory Usage
+
+Monitor database size:
+
+```bash
+# SQLite
+du -h /var/lib/membrane/membrane.db
+
+# Postgres
+psql -c "SELECT pg_size_pretty(pg_database_size('membrane'));"
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Regular Snapshots" icon="camera">
+    Collect metrics every 30-60 seconds for real-time monitoring
+  </Card>
+  <Card title="Baseline Metrics" icon="chart-line">
+    Establish baseline values during normal operation
+  </Card>
+  <Card title="Alert Thresholds" icon="bell">
+    Set alerts for unexpected deviations from baseline
+  </Card>
+  <Card title="Trend Analysis" icon="arrow-trend-up">
+    Track metrics over days/weeks to identify patterns
+  </Card>
+</CardGroup>
+
+## Debugging Memory Issues
+
+### Too Many Episodic Records
+
+```typescript
+const metrics = await client.getMetrics();
+
+if (metrics.records_by_type.episodic > 1000) {
+  console.warn("High episodic count. Consider more aggressive pruning.");
+}
+```
+
+**Solution:** Adjust decay intervals or enable auto-pruning.
+
+### Low Active Records
+
+```python
+metrics = client.get_metrics()
+
+active_ratio = metrics.active_records / metrics.total_records
+if active_ratio < 0.3:
+    print("Warning: Most records have decayed to zero salience")
+```
+
+**Solution:** Increase reinforcement or adjust decay curves.
+
+### Stagnant Competence
+
+```go
+if snapshot.CompetenceSuccessRate < 0.5 && snapshot.RecordsByType["competence"] > 10 {
+    log.Println("Competence records have low success rate. Review extraction logic.")
+}
+```
+
+**Solution:** Improve outcome tracking or competence extraction.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="sliders" href="/guides/configuration">
+    Tune decay and consolidation intervals
+  </Card>
+  <Card title="Daemon Deployment" icon="server" href="/guides/daemon-deployment">
+    Set up health checks and monitoring
+  </Card>
+  <Card title="LLM Integration" icon="brain" href="/guides/llm-integration">
+    Implement reinforcement loops
+  </Card>
+  <Card title="API Reference" icon="book" href="/api/overview">
+    Complete gRPC API documentation
+  </Card>
+</CardGroup>

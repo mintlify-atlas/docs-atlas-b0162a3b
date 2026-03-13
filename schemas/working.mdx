@@ -1,0 +1,209 @@
+---
+title: 'Working Memory'
+description: 'Current state of ongoing tasks enabling cross-session resumption'
+icon: 'list-check'
+---
+
+## Overview
+
+Working memory captures the current state of an ongoing task, enabling seamless resumption across sessions or devices. It represents the agent's active context and immediate goals.
+
+**Key Characteristics:**
+- Freely editable during task execution (RFC 15A.7)
+- Discarded when task completes
+- Tracks active constraints and blockers
+- Enables cross-session and cross-device continuity
+- Short-lived and high salience
+
+## Use Cases
+
+- Resuming interrupted tasks across sessions
+- Tracking multi-step workflows with dependencies
+- Managing constraints and blockers
+- Maintaining context during long-running operations
+- Coordinating state across distributed agents
+
+## Schema
+
+<ParamField path="kind" type="string" required>
+  Payload type identifier. Must be `"working"`.
+</ParamField>
+
+<ParamField path="thread_id" type="string" required>
+  Identifier for the current thread or session. Used to group related working memory records.
+</ParamField>
+
+<ParamField path="state" type="string" required>
+  Current task state. One of:
+  - `"planning"` - Task is in planning phase
+  - `"executing"` - Task is actively being executed
+  - `"blocked"` - Task cannot proceed due to a blocker
+  - `"waiting"` - Task is waiting for external input
+  - `"done"` - Task has completed
+</ParamField>
+
+<ParamField path="active_constraints" type="array">
+  List of constraints currently active for the task.
+  
+  <Expandable title="Constraint properties">
+    <ResponseField name="type" type="string" required>
+      Identifies the kind of constraint (e.g., `"trust_level"`, `"timeout"`, `"resource_limit"`).
+    </ResponseField>
+    
+    <ResponseField name="key" type="string" required>
+      The constraint key or name.
+    </ResponseField>
+    
+    <ResponseField name="value" type="any" required>
+      The constraint value (type depends on constraint type).
+    </ResponseField>
+    
+    <ResponseField name="required" type="boolean">
+      Indicates if the constraint is mandatory (defaults to false).
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="next_actions" type="array">
+  List of next planned actions. Array of action hints or descriptions.
+</ParamField>
+
+<ParamField path="open_questions" type="array">
+  List of unresolved questions for the task. Array of question strings.
+</ParamField>
+
+<ParamField path="context_summary" type="string">
+  Summary of the current context. Useful for quick resumption without loading full history.
+</ParamField>
+
+## Example
+
+<CodeGroup>
+```json working-payload.json
+{
+  "kind": "working",
+  "thread_id": "thread_abc123",
+  "state": "executing",
+  "active_constraints": [
+    {
+      "type": "trust_level",
+      "key": "max_trust",
+      "value": "low",
+      "required": true
+    },
+    {
+      "type": "timeout",
+      "key": "max_duration_ms",
+      "value": 30000
+    }
+  ],
+  "next_actions": [
+    "Run tests to verify migration",
+    "Update documentation with schema changes",
+    "Deploy to staging environment"
+  ],
+  "open_questions": [
+    "Should we backfill existing data?",
+    "Does this require a maintenance window?"
+  ],
+  "context_summary": "User requested database schema migration for user profiles table. Migration script generated and executed successfully. Awaiting test results before proceeding to deployment."
+}
+```
+
+```json blocked-state.json
+{
+  "kind": "working",
+  "thread_id": "thread_def456",
+  "state": "blocked",
+  "active_constraints": [
+    {
+      "type": "approval_required",
+      "key": "requires_user_approval",
+      "value": true,
+      "required": true
+    }
+  ],
+  "next_actions": [
+    "Wait for user approval",
+    "Once approved, execute deployment script"
+  ],
+  "open_questions": [
+    "Should we proceed with deployment to production?"
+  ],
+  "context_summary": "Deployment ready but requires explicit user approval before proceeding to production."
+}
+```
+</CodeGroup>
+
+## Lifecycle Rules
+
+### Mutability
+
+**Working payloads MAY be freely edited** (RFC 15A.7) while the task is active. The system can update:
+- Task state transitions
+- Active constraints as they change
+- Next actions as plans evolve
+- Open questions as they are answered or new ones arise
+- Context summary for clarity
+
+This flexibility supports dynamic task execution and adaptation.
+
+### Retention
+
+Working memory has specific retention characteristics:
+- **High salience** while task is active
+- **Automatic cleanup** when task reaches `"done"` state
+- **Grace period** after completion for potential resumption
+- Can be explicitly saved as episodic memory before cleanup
+
+### State Transitions
+
+Valid state transitions:
+```
+planning → executing
+planning → blocked
+executing → blocked
+executing → waiting
+executing → done
+blocked → executing
+blocked → waiting
+waiting → executing
+waiting → blocked
+```
+
+## Best Practices
+
+<Card title="Thread Isolation" icon="layer-group">
+  Use consistent `thread_id` values to group related work. This enables proper filtering and resumption across sessions.
+</Card>
+
+<Card title="Constraint Tracking" icon="shield-check">
+  Always maintain accurate `active_constraints`. These influence plan selection and execution boundaries.
+</Card>
+
+<Card title="Context Summaries" icon="align-left">
+  Keep `context_summary` up-to-date and concise. This is the first thing loaded when resuming a task.
+</Card>
+
+<Card title="Action Planning" icon="list-ol">
+  Maintain `next_actions` in priority order. Clear next steps accelerate resumption and reduce planning overhead.
+</Card>
+
+<Card title="Question Management" icon="circle-question">
+  Track `open_questions` explicitly. Unanswered questions often indicate blockers that should transition state to `"blocked"` or `"waiting"`.
+</Card>
+
+## Cross-Session Resumption
+
+Working memory enables robust cross-session resumption:
+
+1. **Save checkpoint** - Write working memory before session end
+2. **Query on resume** - Load working memory by `thread_id` at session start
+3. **Validate state** - Check if constraints or environment changed
+4. **Continue execution** - Resume from saved state and next actions
+
+## Related
+
+- [Episodic Memory](/schemas/episodic) - Event timeline for current task
+- [Plan Graph](/schemas/plan-graph) - Reusable solution structures
+- [Semantic Memory](/schemas/semantic) - Facts relevant to current task

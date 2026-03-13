@@ -1,0 +1,271 @@
+---
+title: Contributing
+description: Guidelines for contributing to Membrane
+---
+
+Thank you for your interest in contributing to Membrane!
+
+## Code of Conduct
+
+This project follows the [Contributor Covenant Code of Conduct](https://github.com/GustyCube/membrane/blob/main/CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code.
+
+## Getting Started
+
+<Steps>
+  <Step title="Fork and Clone">
+    Fork the repository on GitHub and clone your fork locally:
+    
+    ```bash
+    git clone https://github.com/YOUR_USERNAME/membrane.git
+    cd membrane
+    ```
+  </Step>
+
+  <Step title="Create a Branch">
+    Create a branch for your changes:
+    
+    ```bash
+    git checkout -b feature/your-feature-name
+    ```
+  </Step>
+
+  <Step title="Make Changes">
+    Make your changes following the code style guidelines below.
+  </Step>
+</Steps>
+
+## Development Setup
+
+### Prerequisites
+
+Ensure you have the following installed:
+
+- **Go 1.22 or later** - Core daemon language
+- **Make** - Build automation
+- **Protocol Buffers compiler** (`protoc` >= 3.20) - For gRPC work
+- **Node.js 20+** - TypeScript client development
+- **Python 3.10+** - Python client development
+
+### Building the Project
+
+<CodeGroup>
+```bash Build
+make build
+```
+
+```bash Test
+make test
+```
+
+```bash Lint
+make lint
+```
+
+```bash Format
+make fmt
+```
+</CodeGroup>
+
+### Python Client Development
+
+To work on the Python client:
+
+```bash
+python -m pip install -e "clients/python[dev]"
+python -m pytest clients/python/tests/
+```
+
+### TypeScript Client Development
+
+To work on the TypeScript client:
+
+<CodeGroup>
+```bash Install Dependencies
+make ts-install
+```
+
+```bash Check Proto Sync
+cd clients/typescript && npm run check:proto-sync
+```
+
+```bash Type Check
+make ts-typecheck
+```
+
+```bash Test
+make ts-test
+```
+
+```bash Build
+make ts-build
+```
+</CodeGroup>
+
+## Code Style
+
+<Card title="Go Conventions" icon="code">
+  - Follow standard Go conventions and idioms
+  - Run `make fmt` before committing to format code
+  - Run `make lint` to catch common issues (uses `go vet` + `staticcheck`)
+  - Write table-driven tests where appropriate
+</Card>
+
+<Note>
+  All new code must include tests. Run `make test` to verify all tests pass before submitting your PR.
+</Note>
+
+## Pull Request Process
+
+<Steps>
+  <Step title="Verify Code Quality">
+    Ensure your code passes both linting and tests:
+    
+    ```bash
+    make lint
+    make test
+    ```
+  </Step>
+
+  <Step title="Update Documentation">
+    Update documentation if your changes affect public APIs or user-facing behavior.
+  </Step>
+
+  <Step title="Write a Clear Description">
+    Write a clear PR description explaining:
+    - What changed
+    - Why it changed
+    - Any breaking changes or migration notes
+  </Step>
+
+  <Step title="Keep PRs Focused">
+    Keep PRs focused - one feature or fix per PR. This makes review easier and faster.
+  </Step>
+</Steps>
+
+## SDK Changes
+
+When modifying the protobuf definition (`api/proto/membrane/v1/membrane.proto`), follow this complete checklist:
+
+<Steps>
+  <Step title="Regenerate Go Stubs">
+    ```bash
+    make proto
+    ```
+  </Step>
+
+  <Step title="Update gRPC Handlers">
+    Update handlers in `api/grpc/handlers.go`
+  </Step>
+
+  <Step title="Sync TypeScript Proto">
+    ```bash
+    cd clients/typescript && npm run sync:proto
+    ```
+  </Step>
+
+  <Step title="Update TypeScript Client">
+    - Update client in `clients/typescript/src/client.ts`
+    - Update types in `clients/typescript/src/types.ts` if new enums/types are added
+    - Update exports in `clients/typescript/src/index.ts`
+    - Update the TypeScript client README
+  </Step>
+
+  <Step title="Update Python Client">
+    - Update client in `clients/python/membrane/client.py`
+    - Update types in `clients/python/membrane/types.py` if new enums/types are added
+    - Update `clients/python/membrane/__init__.py` exports
+    - Update the Python client README
+  </Step>
+</Steps>
+
+## TypeScript SDK Release
+
+To release a new version of the TypeScript SDK to npm:
+
+### Prerequisites
+
+- You must have `NPM_TOKEN` set as a repository secret in GitHub
+- The token must have publish permissions for the `@membrane` npm scope
+
+### Version and Tag Requirements
+
+<Note>
+  The git tag `ts-vX.Y.Z` **must match** the version in `clients/typescript/package.json`
+</Note>
+
+For example, to release version `1.2.3`:
+1. Update `clients/typescript/package.json` version to `1.2.3`
+2. Commit and push
+3. Create tag `ts-v1.2.3`
+
+The repository's general `vX.Y.Z` tags drive the main binary release workflow. TypeScript npm publishes are opt-in and only run for `ts-vX.Y.Z` tags.
+
+### Release Checklist
+
+<Steps>
+  <Step title="Run Tests">
+    Ensure all tests pass:
+    ```bash
+    npm test
+    ```
+  </Step>
+
+  <Step title="Update Changelog">
+    Update `CHANGELOG.md` if it exists
+  </Step>
+
+  <Step title="Bump Version">
+    Update version in `clients/typescript/package.json`
+  </Step>
+
+  <Step title="Commit and Tag">
+    ```bash
+    git add clients/typescript/package.json
+    git commit -m "chore(ts): bump version to 1.2.3"
+    git tag ts-v1.2.3
+    git push origin main
+    git push origin ts-v1.2.3
+    ```
+  </Step>
+
+  <Step title="Automatic Publish">
+    GitHub Actions will automatically publish to npm when the tag is pushed.
+  </Step>
+</Steps>
+
+## Commit Messages
+
+Use conventional commit messages with optional scope:
+
+<CodeGroup>
+```bash Features
+feat: add new retrieval filter option
+feat(python): add working state ingestion method
+```
+
+```bash Fixes
+fix: correct decay calculation for linear curves
+fix(grpc): validate merge ID count
+```
+
+```bash Other Types
+docs: update retrieval API documentation
+test: add atomicity tests for revision operations
+ci: add staticcheck to CI pipeline
+```
+</CodeGroup>
+
+## Testing Requirements
+
+<Card title="Test Coverage" icon="check">
+  - All new code must include tests
+  - Run `make test` to verify all tests pass
+  - Aim for meaningful coverage of business logic
+  - Write table-driven tests for complex scenarios
+</Card>
+
+See the [Testing](/development/testing) guide for detailed information on the test suite.
+
+## License
+
+By contributing, you agree that your contributions will be licensed under the MIT License.

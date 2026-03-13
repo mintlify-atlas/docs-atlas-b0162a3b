@@ -1,0 +1,364 @@
+---
+title: 'Retrieval'
+description: 'Layered memory retrieval with trust context gating'
+---
+
+The `retrieval` package implements layered memory retrieval as specified in RFC 15.8. It performs trust-based filtering, salience ranking, and multi-solution selection for competence and plan graph records.
+
+## Service
+
+The retrieval service provides the main retrieval interface:
+
+```go
+type Service struct {
+    store     storage.Store
+    selector  *Selector
+    embedding EmbeddingService
+}
+
+func NewService(store storage.Store, selector *Selector) *Service
+func NewServiceWithEmbedding(store storage.Store, selector *Selector, embedding EmbeddingService) *Service
+```
+
+## Retrieval Methods
+
+### Retrieve()
+
+Performs layered retrieval across all memory types in canonical order: working → semantic → competence → plan_graph → episodic.
+
+```go
+func (svc *Service) Retrieve(ctx context.Context, req *RetrieveRequest) (*RetrieveResponse, error)
+```
+
+**Request:**
+```go
+type RetrieveRequest struct {
+    TaskDescriptor string               // Current task for contextual retrieval
+    Trust          *TrustContext        // Trust context that gates access
+    MemoryTypes    []schema.MemoryType  // Optional: restrict to specific types
+    MinSalience    float64              // Filter out records below this threshold
+    Limit          int                  // Cap total records returned (0 = no limit)
+}
+```
+
+**Response:**
+```go
+type RetrieveResponse struct {
+    Records   []*schema.MemoryRecord  // Filtered, sorted, limited results
+    Selection *SelectionResult        // Non-nil when selector evaluated candidates
+}
+```
+
+**Example:**
+```go
+trust := retrieval.NewTrustContext(
+    schema.SensitivityMedium,  // Max sensitivity allowed
+    true,                       // Authenticated
+    "agent-1",                  // Actor ID
+    []string{"project-alpha"},  // Allowed scopes
+)
+
+resp, err := svc.Retrieve(ctx, &retrieval.RetrieveRequest{
+    TaskDescriptor: "debug authentication error",
+    Trust:          trust,
+    MinSalience:    0.5,
+    Limit:          20,
+})
+if err != nil {
+    log.Fatal(err)
+}
+
+for _, rec := range resp.Records {
+    log.Printf("Retrieved: %s (type=%s, salience=%.2f)", rec.ID, rec.Type, rec.Salience)
+}
+```
+
+### RetrieveByID()
+
+Fetches a single record by ID with trust context gating.
+
+```go
+func (svc *Service) RetrieveByID(ctx context.Context, id string, trust *TrustContext) (*schema.MemoryRecord, error)
+```
+
+**Example:**
+```go
+rec, err := svc.RetrieveByID(ctx, "record-123", trust)
+if err == retrieval.ErrAccessDenied {
+    log.Println("Access denied by trust context")
+    return
+}
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+### RetrieveByType()
+
+Fetches all records of a specific type that pass the trust check.
+
+```go
+func (svc *Service) RetrieveByType(ctx context.Context, memType schema.MemoryType, trust *TrustContext) ([]*schema.MemoryRecord, error)
+```
+
+**Example:**
+```go
+semanticRecords, err := svc.RetrieveByType(ctx, schema.MemoryTypeSemantic, trust)
+if err != nil {
+    log.Fatal(err)
+}
+log.Printf("Found %d semantic records", len(semanticRecords))
+```
+
+## Trust Context
+
+The `TrustContext` gates retrieval based on sensitivity and scope:
+
+```go
+type TrustContext struct {
+    MaxSensitivity schema.Sensitivity  // Maximum sensitivity level allowed
+    Authenticated  bool                // Whether requester is authenticated
+    ActorID        string              // Who is making the request
+    Scopes         []string            // Allowed scopes (empty = all scopes)
+}
+
+func NewTrustContext(
+    maxSensitivity schema.Sensitivity,
+    authenticated bool,
+    actorID string,
+    scopes []string,
+) *TrustContext
+```
+
+### Trust Context Methods
+
+#### Allows()
+
+Checks whether a record is accessible under this trust context.
+
+```go
+func (tc *TrustContext) Allows(record *schema.MemoryRecord) bool
+```
+
+A record is allowed if:
+- Its sensitivity level ≤ MaxSensitivity
+- Its scope matches one of the allowed scopes (or trust context has no scope restrictions)
+
+**Example:**
+```go
+trust := retrieval.NewTrustContext(
+    schema.SensitivityMedium,
+    true,
+    "agent-1",
+    []string{"project-alpha"},
+)
+
+if trust.Allows(record) {
+    // Access granted
+} else {
+    // Access denied
+}
+```
+
+#### AllowsRedacted()
+
+Returns true if the record's sensitivity is exactly one level above the trust context's maximum, allowing a redacted view.
+
+```go
+func (tc *TrustContext) AllowsRedacted(record *schema.MemoryRecord) bool
+```
+
+Records at this level are visible as metadata but with sensitive content removed.
+
+## Filters
+
+### FilterByTrust()
+
+Filters records by trust context. Records at exactly one level above the threshold are returned in redacted form.
+
+```go
+func FilterByTrust(records []*schema.MemoryRecord, trust *TrustContext) []*schema.MemoryRecord
+```
+
+### FilterBySalience()
+
+Returns only records whose salience is at or above the minimum threshold.
+
+```go
+func FilterBySalience(records []*schema.MemoryRecord, minSalience float64) []*schema.MemoryRecord
+```
+
+### FilterBySensitivity()
+
+Returns only records whose sensitivity level is at or below the maximum.
+
+```go
+func FilterBySensitivity(records []*schema.MemoryRecord, maxSensitivity schema.Sensitivity) []*schema.MemoryRecord
+```
+
+### SortBySalience()
+
+Sorts records by salience in descending order (highest first).
+
+```go
+func SortBySalience(records []*schema.MemoryRecord)
+```
+
+### Redact()
+
+Creates a redacted copy of a record, preserving metadata while removing sensitive content.
+
+```go
+func Redact(record *schema.MemoryRecord) *schema.MemoryRecord
+```
+
+A redacted record retains: ID, Type, Sensitivity, Confidence, Salience, CreatedAt, UpdatedAt, Scope, Tags
+
+And clears: Payload, Provenance, AuditLog, Relations
+
+## Selector
+
+The `Selector` performs multi-solution selection for competence and plan_graph records using three signals:
+
+1. **Applicability** - How well triggers/constraints match (uses record confidence or embedding similarity)
+2. **Observed success rate** - From PerformanceStats
+3. **Recency of reinforcement** - More recently reinforced records score higher
+
+```go
+type Selector struct {
+    confidenceThreshold float64
+    embedding           EmbeddingProvider
+}
+
+func NewSelector(confidenceThreshold float64) *Selector
+func NewSelectorWithEmbedding(confidenceThreshold float64, embedding EmbeddingProvider) *Selector
+```
+
+### Select()
+
+Ranks candidate records and returns a SelectionResult.
+
+```go
+func (s *Selector) Select(
+    ctx context.Context,
+    candidates []*schema.MemoryRecord,
+    queryEmbedding []float32,
+) *SelectionResult
+```
+
+**SelectionResult:**
+```go
+type SelectionResult struct {
+    Selected   []*schema.MemoryRecord  // Ranked candidates in descending score order
+    Confidence float64                 // Selection confidence in [0, 1]
+    NeedsMore  bool                    // True if confidence < threshold
+    Scores     map[string]float64      // Computed score for each record ID
+}
+```
+
+**Example:**
+```go
+selector := retrieval.NewSelector(0.7)
+result := selector.Select(ctx, competenceRecords, nil)
+
+if result.NeedsMore {
+    log.Println("Low confidence - may need user disambiguation")
+}
+
+log.Printf("Best candidate: %s (score=%.2f)", 
+    result.Selected[0].ID, 
+    result.Scores[result.Selected[0].ID],
+)
+```
+
+## Complete Example
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+
+    "github.com/GustyCube/membrane/pkg/retrieval"
+    "github.com/GustyCube/membrane/pkg/schema"
+    "github.com/GustyCube/membrane/pkg/storage/sqlite"
+)
+
+func main() {
+    store, err := sqlite.Open("membrane.db", "")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer store.Close()
+
+    // Create retrieval service with selector
+    selector := retrieval.NewSelector(0.7)
+    svc := retrieval.NewService(store, selector)
+
+    ctx := context.Background()
+
+    // Define trust context
+    trust := retrieval.NewTrustContext(
+        schema.SensitivityHigh,
+        true,
+        "agent-1",
+        []string{"project-alpha", "shared"},
+    )
+
+    // Retrieve working and semantic memory for current task
+    resp, err := svc.Retrieve(ctx, &retrieval.RetrieveRequest{
+        TaskDescriptor: "implement user authentication",
+        Trust:          trust,
+        MemoryTypes: []schema.MemoryType{
+            schema.MemoryTypeWorking,
+            schema.MemoryTypeSemantic,
+            schema.MemoryTypeCompetence,
+        },
+        MinSalience: 0.3,
+        Limit:       15,
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Process results
+    for _, rec := range resp.Records {
+        log.Printf("[%s] %s (salience=%.2f, sensitivity=%s)",
+            rec.Type, rec.ID, rec.Salience, rec.Sensitivity)
+    }
+
+    // Check if selector found competence candidates
+    if resp.Selection != nil {
+        log.Printf("Selector evaluated %d candidates (confidence=%.2f)",
+            len(resp.Selection.Selected), resp.Selection.Confidence)
+        if resp.Selection.NeedsMore {
+            log.Println("⚠️  Low confidence - consider requesting clarification")
+        }
+    }
+}
+```
+
+## Error Handling
+
+```go
+var (
+    ErrAccessDenied = errors.New("access denied by trust context")
+    ErrNilTrust     = errors.New("trust context is required")
+)
+```
+
+**Example:**
+```go
+rec, err := svc.RetrieveByID(ctx, id, trust)
+switch {
+case errors.Is(err, retrieval.ErrAccessDenied):
+    log.Println("Access denied - insufficient permissions")
+case errors.Is(err, retrieval.ErrNilTrust):
+    log.Println("Trust context is required")
+case errors.Is(err, storage.ErrNotFound):
+    log.Println("Record not found")
+case err != nil:
+    log.Fatal(err)
+}
+```

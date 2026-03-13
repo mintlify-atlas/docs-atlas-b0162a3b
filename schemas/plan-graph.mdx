@@ -1,0 +1,389 @@
+---
+title: 'Plan Graph'
+description: 'Reusable solution structures as directed graphs of actions'
+icon: 'diagram-project'
+---
+
+## Overview
+
+Plan graphs store reusable solution structures as directed graphs of actions. They represent complex, multi-step plans with dependencies and conditional execution paths.
+
+**Key Characteristics:**
+- Directed graph structure (RFC 15A.10)
+- Reusable across similar scenarios
+- Constraint-based selection
+- Versioned for evolution
+- Performance-tracked for optimization
+
+## Use Cases
+
+- Encoding complex deployment pipelines
+- Storing multi-step migration procedures
+- Representing decision trees with conditional branches
+- Managing dependencies between parallel operations
+- Reusing proven solution patterns across projects
+
+## Schema
+
+<ParamField path="kind" type="string" required>
+  Payload type identifier. Must be `"plan_graph"`.
+</ParamField>
+
+<ParamField path="plan_id" type="string" required>
+  Unique identifier for this plan (e.g., `"deploy_web_service"`, `"migrate_database"`).
+</ParamField>
+
+<ParamField path="version" type="string" required>
+  Version identifier for this plan (e.g., `"1.0.0"`, `"2024-03-13"`).
+</ParamField>
+
+<ParamField path="intent" type="string">
+  High-level intent label for intent matching (e.g., `"setup_project"`, `"deploy_service"`).
+</ParamField>
+
+<ParamField path="constraints" type="object">
+  Defines trust requirements, sensitivity limits, and other execution constraints.
+  Example: `{"max_trust": "low", "max_duration_sec": 300, "requires_approval": false}`
+</ParamField>
+
+<ParamField path="inputs_schema" type="object">
+  Defines expected inputs for the plan (JSON Schema format).
+</ParamField>
+
+<ParamField path="outputs_schema" type="object">
+  Defines expected outputs from the plan (JSON Schema format).
+</ParamField>
+
+<ParamField path="nodes" type="array" required>
+  Action nodes in the plan graph.
+  
+  <Expandable title="PlanNode properties">
+    <ResponseField name="id" type="string" required>
+      Unique identifier for this node within the plan.
+    </ResponseField>
+    
+    <ResponseField name="op" type="string" required>
+      Action or tool identifier (e.g., `"bash"`, `"read"`, `"http_request"`).
+    </ResponseField>
+    
+    <ResponseField name="params" type="object">
+      Parameters for the operation (tool-specific).
+    </ResponseField>
+    
+    <ResponseField name="guards" type="object">
+      Conditional execution criteria. Node only executes if guards pass.
+      Example: `{"env": "production", "approval_status": "approved"}`
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="edges" type="array" required>
+  Dependency edges in the plan graph.
+  
+  <Expandable title="PlanEdge properties">
+    <ResponseField name="from" type="string" required>
+      Source node ID.
+    </ResponseField>
+    
+    <ResponseField name="to" type="string" required>
+      Target node ID.
+    </ResponseField>
+    
+    <ResponseField name="kind" type="string" required>
+      Edge type:
+      - `"data"` - Data dependency (output of source is input to target)
+      - `"control"` - Control flow (target executes after source completes)
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="metrics" type="object">
+  Tracks plan execution statistics.
+  
+  <Expandable title="PlanMetrics properties">
+    <ResponseField name="avg_latency_ms" type="number">
+      Average execution time in milliseconds.
+    </ResponseField>
+    
+    <ResponseField name="failure_rate" type="number">
+      Rate of failed executions (range: 0 to 1).
+    </ResponseField>
+    
+    <ResponseField name="execution_count" type="integer">
+      Total number of executions.
+    </ResponseField>
+    
+    <ResponseField name="last_executed_at" type="timestamp">
+      When this plan was last executed.
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+## Examples
+
+<CodeGroup>
+```json simple-deployment.json
+{
+  "kind": "plan_graph",
+  "plan_id": "deploy_web_service",
+  "version": "1.0.0",
+  "intent": "deploy_service",
+  "constraints": {
+    "max_trust": "medium",
+    "requires_approval": true,
+    "max_duration_sec": 600
+  },
+  "inputs_schema": {
+    "type": "object",
+    "properties": {
+      "service_name": {"type": "string"},
+      "environment": {"type": "string", "enum": ["staging", "production"]},
+      "version": {"type": "string"}
+    },
+    "required": ["service_name", "environment", "version"]
+  },
+  "outputs_schema": {
+    "type": "object",
+    "properties": {
+      "deployment_url": {"type": "string"},
+      "status": {"type": "string"}
+    }
+  },
+  "nodes": [
+    {
+      "id": "build",
+      "op": "bash",
+      "params": {
+        "command": "docker build -t ${service_name}:${version} ."
+      }
+    },
+    {
+      "id": "test",
+      "op": "bash",
+      "params": {
+        "command": "docker run ${service_name}:${version} npm test"
+      }
+    },
+    {
+      "id": "push",
+      "op": "bash",
+      "params": {
+        "command": "docker push registry.example.com/${service_name}:${version}"
+      }
+    },
+    {
+      "id": "deploy",
+      "op": "kubectl_apply",
+      "params": {
+        "manifest": "k8s/deployment.yaml",
+        "namespace": "${environment}"
+      },
+      "guards": {
+        "environment": "production",
+        "approval_status": "approved"
+      }
+    }
+  ],
+  "edges": [
+    {"from": "build", "to": "test", "kind": "control"},
+    {"from": "test", "to": "push", "kind": "control"},
+    {"from": "push", "to": "deploy", "kind": "control"},
+    {"from": "build", "to": "deploy", "kind": "data"}
+  ],
+  "metrics": {
+    "avg_latency_ms": 45000,
+    "failure_rate": 0.05,
+    "execution_count": 89,
+    "last_executed_at": "2026-03-12T16:30:00Z"
+  }
+}
+```
+
+```json parallel-processing.json
+{
+  "kind": "plan_graph",
+  "plan_id": "process_data_pipeline",
+  "version": "2.1.0",
+  "intent": "data_processing",
+  "constraints": {
+    "max_trust": "low",
+    "max_duration_sec": 1800
+  },
+  "inputs_schema": {
+    "type": "object",
+    "properties": {
+      "data_source": {"type": "string"},
+      "output_format": {"type": "string"}
+    },
+    "required": ["data_source"]
+  },
+  "nodes": [
+    {
+      "id": "fetch",
+      "op": "http_request",
+      "params": {
+        "url": "${data_source}",
+        "method": "GET"
+      }
+    },
+    {
+      "id": "parse",
+      "op": "json_parse",
+      "params": {}
+    },
+    {
+      "id": "validate",
+      "op": "json_validate",
+      "params": {
+        "schema": "data_schema.json"
+      }
+    },
+    {
+      "id": "transform_a",
+      "op": "jq",
+      "params": {
+        "filter": ".records | map({id, name})"
+      }
+    },
+    {
+      "id": "transform_b",
+      "op": "jq",
+      "params": {
+        "filter": ".records | map({id, created_at})"
+      }
+    },
+    {
+      "id": "merge",
+      "op": "merge_json",
+      "params": {}
+    },
+    {
+      "id": "store",
+      "op": "write_file",
+      "params": {
+        "path": "output/processed.json"
+      }
+    }
+  ],
+  "edges": [
+    {"from": "fetch", "to": "parse", "kind": "data"},
+    {"from": "parse", "to": "validate", "kind": "data"},
+    {"from": "validate", "to": "transform_a", "kind": "data"},
+    {"from": "validate", "to": "transform_b", "kind": "data"},
+    {"from": "transform_a", "to": "merge", "kind": "data"},
+    {"from": "transform_b", "to": "merge", "kind": "data"},
+    {"from": "merge", "to": "store", "kind": "data"}
+  ],
+  "metrics": {
+    "avg_latency_ms": 3200,
+    "failure_rate": 0.02,
+    "execution_count": 456,
+    "last_executed_at": "2026-03-13T09:15:00Z"
+  }
+}
+```
+</CodeGroup>
+
+## Lifecycle Rules
+
+### Plan Selection
+
+**Plan graphs MUST be selectable by constraint matching** (RFC 15A.10). Selection process:
+
+1. **Intent Matching** - Filter plans by intent label
+2. **Constraint Satisfaction** - Verify plan constraints match execution context
+3. **Input Validation** - Check required inputs are available
+4. **Performance Evaluation** - Consider success rate and latency
+5. **Version Selection** - Choose most recent stable version
+
+### Execution Model
+
+Graph execution follows dependency order:
+
+1. **Topological Sort** - Determine execution order from edges
+2. **Parallel Execution** - Execute independent nodes concurrently
+3. **Guard Evaluation** - Skip nodes with failing guards
+4. **Data Flow** - Pass outputs along data edges
+5. **Error Handling** - Halt on failure or continue based on policy
+
+### Versioning
+
+Plans evolve through versioning:
+- **Patch** (1.0.1) - Bug fixes, parameter adjustments
+- **Minor** (1.1.0) - New optional nodes, optimization
+- **Major** (2.0.0) - Breaking changes to structure or contracts
+
+## Best Practices
+
+<Card title="Node Granularity" icon="cubes">
+  Keep nodes at appropriate granularity - each node should be a single logical operation. Break complex operations into multiple nodes.
+</Card>
+
+<Card title="Edge Semantics" icon="arrows-turn-right">
+  Use `"data"` edges when output is required as input. Use `"control"` edges for ordering without data dependency.
+</Card>
+
+<Card title="Guard Conditions" icon="shield-halved">
+  Use guards for conditional execution rather than creating separate plans. This keeps related logic together.
+</Card>
+
+<Card title="Input/Output Schemas" icon="file-contract">
+  Always define input and output schemas. This enables validation and makes plans self-documenting.
+</Card>
+
+<Card title="Constraint Documentation" icon="list-check">
+  Explicitly document constraints. This helps with plan selection and prevents execution in inappropriate contexts.
+</Card>
+
+<Card title="Metrics Tracking" icon="chart-line">
+  Update metrics after each execution. Use this data to identify bottlenecks and optimize execution paths.
+</Card>
+
+## Graph Patterns
+
+### Sequential Pipeline
+```
+A → B → C → D
+```
+Simple linear dependency chain.
+
+### Parallel Fan-out
+```
+    ┌→ B
+A → ├→ C
+    └→ D → E
+```
+Parallel execution with merge point.
+
+### Conditional Branch
+```
+A → B (guard: prod) → D
+  → C (guard: dev)  → D
+```
+Guard-based conditional execution.
+
+### Diamond Pattern
+```
+    ┌→ B →┐
+A →{       }→ E
+    └→ C →┘
+     → D
+```
+Parallel branches with independent path.
+
+## From Competence to Plan Graph
+
+Relationship with competence memory:
+
+- **Competence** - Simple linear recipes, trigger-based
+- **Plan Graph** - Complex graphs with parallelism and conditionals
+
+When to use each:
+- Use **competence** for straightforward procedures
+- Use **plan graph** for complex workflows with dependencies
+
+## Related
+
+- [Competence Memory](/schemas/competence) - Simpler procedural knowledge
+- [Working Memory](/schemas/working) - Current task execution state
+- [Episodic Memory](/schemas/episodic) - Source events for plan extraction

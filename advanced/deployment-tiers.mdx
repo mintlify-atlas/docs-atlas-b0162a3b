@@ -1,0 +1,346 @@
+---
+title: Deployment Tiers
+description: Choose the right Membrane deployment tier for your workload
+---
+
+Membrane supports four deployment tiers, each adding capabilities while remaining backward-compatible with simpler configurations.
+
+## Tier Overview
+
+| Tier | Backend | Embedding | LLM | Use Case |
+|------|---------|-----------|-----|----------|
+| **1** | SQLite | - | - | Development, single-process agents |
+| **2** | Postgres | - | - | Production multi-process deployments |
+| **3** | Postgres + pgvector | Yes | - | Semantic similarity-based retrieval |
+| **4** | Postgres + pgvector | Yes | Yes | Full semantic extraction pipeline |
+
+## Tier 1: SQLite (Zero Infrastructure)
+
+The default tier requires no external dependencies.
+
+<Steps>
+  <Step title="Build the daemon">
+    ```bash
+    make build
+    ```
+  </Step>
+
+  <Step title="Run with default settings">
+    ```bash
+    ./bin/membraned
+    ```
+    Defaults to `membrane.db` in the current directory.
+  </Step>
+
+  <Step title="Or specify a custom path">
+    ```bash
+    ./bin/membraned --db /path/to/membrane.db
+    ```
+  </Step>
+</Steps>
+
+### Features
+
+- **Storage**: SQLite with WAL mode and foreign key enforcement
+- **Encryption**: Optional SQLCipher encryption at rest (set `MEMBRANE_ENCRYPTION_KEY`)
+- **Retrieval**: Confidence-based applicability scoring for competence and plan_graph records
+- **Concurrency**: Single writer, multiple readers (SQLite semantics)
+- **Transactions**: Serializable isolation
+
+### When to Use
+
+- Local development and testing
+- Single-agent deployments
+- Edge deployments with no network dependencies
+- Embedded library mode in Go applications
+
+<Note>
+SQLite mode uses confidence as a fallback for applicability scoring since there are no embeddings. For semantic similarity search, use Tier 3 or higher.
+</Note>
+
+---
+
+## Tier 2: Postgres (Concurrent Writes)
+
+Postgres backend enables concurrent writes and JSONB indexing.
+
+<Steps>
+  <Step title="Start a Postgres instance">
+    ```bash
+    docker run -d \
+      -e POSTGRES_DB=membrane \
+      -e POSTGRES_USER=membrane \
+      -e POSTGRES_PASSWORD=membrane \
+      -p 5432:5432 \
+      postgres:16
+    ```
+  </Step>
+
+  <Step title="Run Membrane with Postgres">
+    ```bash
+    ./bin/membraned --postgres-dsn "postgres://membrane:membrane@localhost:5432/membrane?sslmode=disable"
+    ```
+  </Step>
+</Steps>
+
+### Configuration
+
+```yaml config.yaml
+backend: postgres
+postgres_dsn: "postgres://membrane:membrane@localhost:5432/membrane?sslmode=require"
+listen_addr: ":9090"
+decay_interval: "1h"
+consolidation_interval: "6h"
+```
+
+### Features
+
+- **Storage**: Postgres 16+ with JSONB payloads
+- **Concurrency**: Full concurrent read/write support
+- **Transactions**: Serializable isolation level
+- **Retrieval**: Same confidence-based scoring as Tier 1
+- **Schema**: Automatic creation on first connect
+
+### When to Use
+
+- Multi-agent systems with concurrent memory updates
+- Cloud deployments requiring horizontal scaling
+- Workloads requiring JSONB query optimization
+- Production systems with operational tooling for Postgres
+
+---
+
+## Tier 3: Postgres + pgvector (Semantic Retrieval)
+
+Adds embedding-based applicability scoring for competence and plan_graph selection.
+
+<Steps>
+  <Step title="Start Postgres with pgvector">
+    ```bash
+    docker run -d \
+      -e POSTGRES_DB=membrane \
+      -e POSTGRES_USER=membrane \
+      -e POSTGRES_PASSWORD=membrane \
+      -p 5432:5432 \
+      pgvector/pgvector:pg16
+    ```
+  </Step>
+
+  <Step title="Configure embedding endpoint">
+    ```yaml config.yaml
+    backend: postgres
+    postgres_dsn: "postgres://membrane:membrane@localhost:5432/membrane?sslmode=disable"
+    
+    embedding_endpoint: "https://api.openai.com/v1/embeddings"
+    embedding_model: "text-embedding-3-small"
+    embedding_dimensions: 1536
+    # embedding_api_key: ""  # or set MEMBRANE_EMBEDDING_API_KEY
+    ```
+  </Step>
+
+  <Step title="Start the daemon">
+    ```bash
+    export MEMBRANE_EMBEDDING_API_KEY="sk-..."
+    ./bin/membraned --config config.yaml
+    ```
+  </Step>
+</Steps>
+
+### Features
+
+- **Vector Storage**: pgvector with IVFFlat index (cosine distance)
+- **Embedding Dimensions**: Configurable (default: 1536)
+- **Similarity Search**: Cosine similarity for trigger embeddings
+- **Applicability Scoring**: Embedding-based competence and plan_graph selection
+- **Metadata Validation**: Ensures embedding model and dimensions match across restarts
+
+### Retrieval Behavior
+
+When embeddings are enabled:
+
+1. **Competence records**: Applicability scored by embedding similarity to task descriptor
+2. **Plan graph records**: Similarity scoring for reusable solution structures
+3. **Semantic/episodic/working**: Standard confidence and salience ranking
+
+<CodeGroup>
+```go Go Library
+import (
+    "github.com/GustyCube/membrane/pkg/membrane"
+    "github.com/GustyCube/membrane/pkg/retrieval"
+)
+
+cfg := membrane.DefaultConfig()
+cfg.Backend = "postgres"
+cfg.PostgresDSN = "postgres://membrane:membrane@localhost:5432/membrane?sslmode=disable"
+cfg.EmbeddingEndpoint = "https://api.openai.com/v1/embeddings"
+cfg.EmbeddingModel = "text-embedding-3-small"
+cfg.EmbeddingDimensions = 1536
+cfg.EmbeddingAPIKey = os.Getenv("MEMBRANE_EMBEDDING_API_KEY")
+
+m, _ := membrane.New(cfg)
+defer m.Stop()
+```
+
+```typescript TypeScript Client
+import { MembraneClient } from "@gustycube/membrane";
+
+const client = new MembraneClient("localhost:9090", {
+  apiKey: process.env.MEMBRANE_API_KEY,
+});
+
+const results = await client.retrieve("fix database migration error", {
+  trust: {
+    max_sensitivity: "medium",
+    authenticated: true,
+  },
+  memoryTypes: ["competence", "semantic"],
+});
+```
+</CodeGroup>
+
+### When to Use
+
+- Agents that need semantic similarity search over procedures
+- Workloads with large competence libraries
+- Plan-graph reuse across semantically similar tasks
+
+<Warning>
+Embedding API calls are synchronous during ingestion. For high-throughput workloads, consider batching or caching embeddings.
+</Warning>
+
+---
+
+## Tier 4: Full LLM Pipeline (Semantic Extraction)
+
+Adds LLM-backed episodic-to-semantic consolidation.
+
+<Steps>
+  <Step title="Configure LLM endpoint">
+    ```yaml config.yaml
+    backend: postgres
+    postgres_dsn: "postgres://membrane:membrane@localhost:5432/membrane?sslmode=disable"
+    
+    # Embedding config (required for Tier 4)
+    embedding_endpoint: "https://api.openai.com/v1/embeddings"
+    embedding_model: "text-embedding-3-small"
+    embedding_dimensions: 1536
+    
+    # LLM config for semantic extraction
+    llm_endpoint: "https://api.openai.com/v1/chat/completions"
+    llm_model: "gpt-4o-mini"
+    # llm_api_key: ""  # or set MEMBRANE_LLM_API_KEY
+    ```
+  </Step>
+
+  <Step title="Start with both API keys">
+    ```bash
+    export MEMBRANE_EMBEDDING_API_KEY="sk-..."
+    export MEMBRANE_LLM_API_KEY="sk-..."
+    ./bin/membraned --config config.yaml
+    ```
+  </Step>
+</Steps>
+
+### Features
+
+All Tier 3 features plus:
+
+- **Episodic Extraction**: Background job extracts semantic triples from episodic records
+- **LLM-Backed Consolidation**: Structured fact extraction during consolidation cycles
+- **Extraction Tracking**: `episodic_extraction_log` table prevents duplicate processing
+- **Stale Claim Cleanup**: Automatic retry of failed extraction jobs
+
+### Consolidation Behavior
+
+Every consolidation interval (default: 6 hours), Membrane:
+
+1. Claims up to 50 unprocessed episodic records
+2. Sends each to the LLM endpoint with a structured extraction prompt
+3. Parses subject-predicate-object triples from the response
+4. Creates semantic records with `derived_from` relations to episodic sources
+5. Marks extraction complete in `episodic_extraction_log`
+
+### Extraction Example
+
+**Episodic input:**
+```json
+{
+  "event_kind": "tool_call",
+  "summary": "Ran go build, failed with linker cache error. Cleared cache with go clean -cache, rebuilt successfully.",
+  "tags": ["build", "error", "go"]
+}
+```
+
+**LLM-extracted semantic triples:**
+```json
+[
+  {
+    "subject": "go build",
+    "predicate": "fails_with",
+    "object": "linker cache error"
+  },
+  {
+    "subject": "go clean -cache",
+    "predicate": "resolves",
+    "object": "linker cache error"
+  }
+]
+```
+
+### When to Use
+
+- Agents with high episodic ingestion volume
+- Systems that need to learn patterns from raw observations
+- Long-running agents where consolidation replaces manual fact curation
+
+<Note>
+LLM extraction runs asynchronously during consolidation. Episodic records remain queryable immediately; semantic facts appear after the next consolidation cycle.
+</Note>
+
+---
+
+## Migration Between Tiers
+
+### Tier 1 → Tier 2
+
+1. Export SQLite data (custom script or manual migration)
+2. Create Postgres schema (automatic on first connect)
+3. Import records into Postgres
+4. Update `backend` and `postgres_dsn` in config
+
+### Tier 2 → Tier 3
+
+1. Add `embedding_*` configuration
+2. Restart daemon (schema updated automatically with `CREATE EXTENSION IF NOT EXISTS vector`)
+3. Existing records won't have embeddings; new ingests will generate them
+4. Optional: backfill embeddings for existing competence/plan_graph records
+
+### Tier 3 → Tier 4
+
+1. Add `llm_*` configuration
+2. Restart daemon
+3. Next consolidation cycle will begin processing episodic records
+
+<Warning>
+Downgrading tiers (e.g., Tier 3 → Tier 2) requires removing embedding config. Vector data remains in the database but is unused. To reclaim space, run `TRUNCATE trigger_embeddings;`.
+</Warning>
+
+---
+
+## Choosing the Right Tier
+
+<Card title="Start with Tier 1" icon="rocket">
+For local development and prototyping. Upgrade when you need concurrency or semantic search.
+</Card>
+
+<Card title="Use Tier 2 for Production" icon="server">
+If you already run Postgres and don't need embedding-based retrieval.
+</Card>
+
+<Card title="Use Tier 3 for Semantic Agents" icon="brain">
+When task-to-competence matching needs similarity, not just keyword/tag overlap.
+</Card>
+
+<Card title="Use Tier 4 for Autonomous Learning" icon="sparkles">
+When you want the agent to extract knowledge from its own episodic traces.
+</Card>

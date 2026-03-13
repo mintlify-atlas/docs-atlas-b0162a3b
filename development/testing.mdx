@@ -1,0 +1,302 @@
+---
+title: Testing
+description: Testing framework and test commands for Membrane
+---
+
+Membrane includes a comprehensive test suite covering unit tests, integration tests, and capability evaluations.
+
+## Running Tests
+
+### Quick Start
+
+Run the entire test suite:
+
+```bash
+make test
+```
+
+This executes all Go tests across the project using `go test ./...`
+
+## Test Structure
+
+The test suite is organized into several categories:
+
+### Unit and Integration Tests
+
+<Card title="Core Test Files" icon="flask">
+  Located in `tests/` directory:
+  - `integration_test.go` - Full lifecycle integration tests
+  - `atomicity_test.go` - Atomicity and transaction tests
+  - `revision_test.go` - Revision operation tests
+  - `selection_test.go` - Record selection tests
+  - `retrieval_order_test.go` - Retrieval ordering tests
+  - `recall_test.go` - Recall regression tests
+  - `config_validation_test.go` - Configuration validation
+</Card>
+
+### Test Helpers
+
+The test suite provides helper functions for creating test instances:
+
+```go
+// Create an in-memory test instance
+func newTestMembrane(t *testing.T) *membrane.Membrane {
+    cfg := membrane.DefaultConfig()
+    cfg.DBPath = ":memory:"
+    cfg.SelectionConfidenceThreshold = 0.3
+    m, err := membrane.New(cfg)
+    if err != nil {
+        t.Fatalf("failed to create membrane: %v", err)
+    }
+    return m
+}
+
+// Full trust context for testing
+func fullTrust() *retrieval.TrustContext {
+    return retrieval.NewTrustContext(
+        schema.SensitivityHyper,
+        true,
+        "test-actor",
+        nil,
+    )
+}
+```
+
+## Test Coverage
+
+### Running Tests with Coverage
+
+Generate test coverage reports:
+
+```bash
+go test ./... -coverprofile=coverage.out
+go tool cover -html=coverage.out -o coverage.html
+```
+
+### Coverage Goals
+
+<Note>
+  Aim for meaningful coverage of business logic. The test suite focuses on:
+  - Ingestion workflows
+  - Retrieval accuracy
+  - Revision semantics
+  - Trust gating
+  - Decay and pruning
+  - Consolidation pipelines
+</Note>
+
+## Integration Tests
+
+### Full Lifecycle Test
+
+The `TestFullLifecycle` test in `integration_test.go` validates:
+
+<Steps>
+  <Step title="Ingestion">
+    Ingest events, tool outputs, observations, and working state
+  </Step>
+
+  <Step title="Retrieval">
+    Retrieve records with trust context and verify filtering
+  </Step>
+
+  <Step title="Revision">
+    Test supersede, fork, retract, and merge operations
+  </Step>
+
+  <Step title="Decay">
+    Verify time-based salience decay
+  </Step>
+
+  <Step title="Consolidation">
+    Test episodic to semantic consolidation
+  </Step>
+</Steps>
+
+## Recall Regression Tests
+
+Test retrieval accuracy with recall@k metrics:
+
+```bash
+go test ./tests -run TestRetrievalRecallAtK
+```
+
+These tests ensure that retrieval quality doesn't regress as the system evolves.
+
+## Client SDK Tests
+
+### Python Client
+
+Test the Python client SDK:
+
+<CodeGroup>
+```bash Install Dev Dependencies
+python -m pip install -e "clients/python[dev]"
+```
+
+```bash Run Tests
+python -m pytest clients/python/tests/
+```
+
+```bash With Coverage
+python -m pytest clients/python/tests/ --cov=membrane
+```
+</CodeGroup>
+
+### TypeScript Client
+
+Test the TypeScript client SDK:
+
+<CodeGroup>
+```bash Install Dependencies
+make ts-install
+```
+
+```bash Run Tests
+make ts-test
+```
+
+```bash Type Check
+make ts-typecheck
+```
+
+```bash Check Proto Sync
+cd clients/typescript && npm run check:proto-sync
+```
+</CodeGroup>
+
+<Note>
+  TypeScript tests use a 120-second hook timeout to accommodate integration test scenarios.
+</Note>
+
+## Test Best Practices
+
+### Writing Tests
+
+<Card title="Test Guidelines" icon="book">
+  1. **Use table-driven tests** for multiple test cases
+  2. **Create focused tests** that test one thing well
+  3. **Use test helpers** like `newTestMembrane()` for setup
+  4. **Clean up resources** with `t.Cleanup()` or `defer`
+  5. **Use meaningful assertions** with clear error messages
+</Card>
+
+### Example Table-Driven Test
+
+```go
+func TestIngestion(t *testing.T) {
+    tests := []struct {
+        name      string
+        eventKind string
+        summary   string
+        wantErr   bool
+    }{
+        {
+            name:      "valid event",
+            eventKind: "tool_call",
+            summary:   "executed command",
+            wantErr:   false,
+        },
+        {
+            name:      "empty summary",
+            eventKind: "tool_call",
+            summary:   "",
+            wantErr:   true,
+        },
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            m := newTestMembrane(t)
+            _, err := m.IngestEvent(ctx, ingestion.IngestEventRequest{
+                Source:    "test",
+                EventKind: tt.eventKind,
+                Summary:   tt.summary,
+            })
+            if (err != nil) != tt.wantErr {
+                t.Errorf("IngestEvent() error = %v, wantErr %v", err, tt.wantErr)
+            }
+        })
+    }
+}
+```
+
+## Continuous Integration
+
+The test suite runs automatically in CI on:
+- Pull requests
+- Pushes to main branch
+- Release tags
+
+### CI Test Command
+
+The CI pipeline runs:
+
+```bash
+make lint
+make test
+make ts-test
+python -m pytest clients/python/tests/
+```
+
+## Debugging Tests
+
+### Running Specific Tests
+
+Run a specific test by name:
+
+```bash
+go test ./tests -run TestFullLifecycle
+```
+
+Run tests matching a pattern:
+
+```bash
+go test ./tests -run TestEval
+```
+
+### Verbose Output
+
+Enable verbose test output:
+
+```bash
+go test -v ./tests
+```
+
+### Show Test Coverage
+
+Show which functions lack coverage:
+
+```bash
+go test ./... -coverprofile=coverage.out
+go tool cover -func=coverage.out
+```
+
+## Performance Testing
+
+For performance-sensitive code, use Go's benchmarking:
+
+```bash
+go test -bench=. -benchmem ./...
+```
+
+Example benchmark:
+
+```go
+func BenchmarkRetrieve(b *testing.B) {
+    m := setupBenchMembrane(b)
+    ctx := context.Background()
+    
+    b.ResetTimer()
+    for i := 0; i < b.N; i++ {
+        m.Retrieve(ctx, &retrieval.RetrieveRequest{
+            TaskDescriptor: "test query",
+            Trust:          fullTrust(),
+        })
+    }
+}
+```
+
+## Next Steps
+
+For capability-specific evaluations and metrics, see the [Evaluation](/development/evaluation) guide.

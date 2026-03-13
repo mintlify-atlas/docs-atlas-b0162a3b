@@ -1,0 +1,558 @@
+---
+title: Security
+description: Encryption, authentication, and trust-aware access control in Membrane
+---
+
+Membrane provides multiple layers of security for protecting sensitive memory data in production deployments.
+
+---
+
+## Encryption at Rest (SQLCipher)
+
+SQLite databases can be encrypted using SQLCipher.
+
+### Enable Encryption
+
+Set the encryption key via environment variable:
+
+```bash
+export MEMBRANE_ENCRYPTION_KEY="your-32-byte-random-key"
+./bin/membraned --db membrane.db
+```
+
+Or in the config file:
+
+```yaml config.yaml
+backend: sqlite
+db_path: "membrane.db"
+encryption_key: "your-32-byte-random-key"  # Not recommended, use env var
+```
+
+### How It Works
+
+The `sqlite.Open` function applies the encryption key using `PRAGMA key`:
+
+```go
+if encryptionKey != "" {
+    if _, err := db.Exec("PRAGMA key = ?", encryptionKey); err != nil {
+        db.Close()
+        return nil, fmt.Errorf("set encryption key: %w", err)
+    }
+}
+```
+
+After opening, Membrane verifies the key by querying `sqlite_master`:
+
+```go
+if _, err := db.Exec("SELECT count(*) FROM sqlite_master"); err != nil {
+    db.Close()
+    return nil, fmt.Errorf("encryption key verification failed: %w", err)
+}
+```
+
+<Warning>
+If you lose the encryption key, the database is **permanently unrecoverable**. Store the key securely (e.g., AWS Secrets Manager, HashiCorp Vault).
+</Warning>
+
+### Key Rotation
+
+SQLCipher does not support online key rotation. To rotate:
+
+<Steps>
+  <Step title="Export plaintext data">
+    ```bash
+    sqlite3 membrane.db "PRAGMA key='old-key'; .dump" > dump.sql
+    ```
+  </Step>
+
+  <Step title="Create new encrypted database">
+    ```bash
+    export MEMBRANE_ENCRYPTION_KEY="new-key"
+    ./bin/membraned --db membrane-new.db &
+    sleep 2
+    pkill membraned
+    ```
+  </Step>
+
+  <Step title="Import data">
+    ```bash
+    sqlite3 membrane-new.db "PRAGMA key='new-key'; .read dump.sql"
+    ```
+  </Step>
+
+  <Step title="Verify and replace">
+    ```bash
+    ./bin/membraned --db membrane-new.db
+    mv membrane.db membrane-old.db
+    mv membrane-new.db membrane.db
+    ```
+  </Step>
+</Steps>
+
+### Postgres Encryption
+
+Postgres does not have built-in application-level encryption like SQLCipher. Options:
+
+- **Filesystem encryption**: LUKS, dm-crypt, AWS EBS encryption
+- **Postgres encryption extensions**: pgcrypto for column-level encryption (requires code changes)
+- **Transparent Data Encryption (TDE)**: Available in Postgres 15+ enterprise editions
+
+<Note>
+For Postgres deployments, rely on infrastructure-level encryption (disk, network) rather than application-level.
+</Note>
+
+---
+
+## TLS Transport Encryption
+
+Membrane supports TLS for gRPC connections.
+
+### Server-Side TLS
+
+<Steps>
+  <Step title="Generate TLS certificates">
+    ```bash
+    # Self-signed for testing
+    openssl req -x509 -newkey rsa:4096 -keyout server-key.pem -out server-cert.pem -days 365 -nodes
+    ```
+  </Step>
+
+  <Step title="Configure Membrane">
+    ```yaml config.yaml
+    tls_cert_file: "server-cert.pem"
+    tls_key_file: "server-key.pem"
+    ```
+  </Step>
+
+  <Step title="Start the daemon">
+    ```bash
+    ./bin/membraned --config config.yaml
+    ```
+  </Step>
+</Steps>
+
+### Client-Side TLS
+
+<CodeGroup>
+```typescript TypeScript
+import { MembraneClient } from "@gustycube/membrane";
+import * as grpc from "@grpc/grpc-js";
+import * as fs from "fs";
+
+const creds = grpc.credentials.createSsl(
+  fs.readFileSync("ca-cert.pem"),  // CA certificate
+  null,                             // client key (for mTLS)
+  null                              // client cert (for mTLS)
+);
+
+const client = new MembraneClient("localhost:9090", {
+  credentials: creds,
+  apiKey: process.env.MEMBRANE_API_KEY,
+});
+```
+
+```python Python
+from membrane import MembraneClient
+import grpc
+
+with open("ca-cert.pem", "rb") as f:
+    creds = grpc.ssl_channel_credentials(f.read())
+
+client = MembraneClient("localhost:9090", credentials=creds, api_key="...")
+```
+
+```go Go
+import (
+    "google.golang.org/grpc"
+    "google.golang.org/grpc/credentials"
+)
+
+creds, _ := credentials.NewClientTLSFromFile("ca-cert.pem", "")
+conn, _ := grpc.Dial("localhost:9090", grpc.WithTransportCredentials(creds))
+```
+</CodeGroup>
+
+### Mutual TLS (mTLS)
+
+For client authentication, generate client certificates and configure both sides:
+
+**Server:**
+
+```yaml config.yaml
+tls_cert_file: "server-cert.pem"
+tls_key_file: "server-key.pem"
+tls_ca_file: "ca-cert.pem"  # requires code modification to support
+```
+
+**Client:**
+
+```typescript
+const creds = grpc.credentials.createSsl(
+  fs.readFileSync("ca-cert.pem"),
+  fs.readFileSync("client-key.pem"),
+  fs.readFileSync("client-cert.pem")
+);
+```
+
+<Note>
+Membrane's current gRPC server code does not expose mTLS configuration. For client cert verification, you'll need to extend the server setup or use an mTLS proxy (e.g., Envoy).
+</Note>
+
+---
+
+## API Key Authentication
+
+Membrane supports Bearer token authentication for gRPC clients.
+
+### Server-Side Configuration
+
+```yaml config.yaml
+api_key: "your-secret-token"  # or set MEMBRANE_API_KEY
+```
+
+Or via environment variable:
+
+```bash
+export MEMBRANE_API_KEY="your-secret-token"
+./bin/membraned
+```
+
+### Client-Side Authentication
+
+Clients send the API key via the `authorization` metadata header:
+
+<CodeGroup>
+```typescript TypeScript
+const client = new MembraneClient("localhost:9090", {
+  apiKey: process.env.MEMBRANE_API_KEY,
+});
+```
+
+```python Python
+client = MembraneClient("localhost:9090", api_key=os.getenv("MEMBRANE_API_KEY"))
+```
+
+```go Go
+import (
+    "google.golang.org/grpc/metadata"
+)
+
+md := metadata.Pairs("authorization", "Bearer "+apiKey)
+ctx := metadata.NewOutgoingContext(ctx, md)
+```
+</CodeGroup>
+
+### Key Rotation
+
+To rotate the API key:
+
+<Steps>
+  <Step title="Generate a new key">
+    ```bash
+    NEW_KEY=$(openssl rand -base64 32)
+    echo $NEW_KEY
+    ```
+  </Step>
+
+  <Step title="Update the server">
+    ```bash
+    export MEMBRANE_API_KEY="$NEW_KEY"
+    # Restart membraned
+    ```
+  </Step>
+
+  <Step title="Update all clients">
+    Deploy the new key to all client applications before restarting the server.
+  </Step>
+</Steps>
+
+<Warning>
+API key authentication is a shared secret. For multi-tenant deployments, use a more sophisticated auth system (e.g., JWT, OAuth2) via a gRPC interceptor.
+</Warning>
+
+---
+
+## Rate Limiting
+
+Membrane includes a token bucket rate limiter.
+
+### Configuration
+
+```yaml config.yaml
+rate_limit_per_second: 100  # default
+```
+
+Set to `0` to disable rate limiting:
+
+```yaml
+rate_limit_per_second: 0
+```
+
+### Behavior
+
+The rate limiter uses a **token bucket** algorithm:
+
+- Tokens refill at `rate_limit_per_second` per second
+- Burst capacity equals the rate limit
+- Requests block if the bucket is empty
+
+Example:
+
+- `rate_limit_per_second: 100`
+- Client sends 150 requests in 1 second
+- First 100 succeed immediately
+- Next 50 block until tokens refill
+
+### Per-Client vs Global
+
+The current implementation applies rate limiting **globally** across all clients. For per-client limiting, you'd need to extend the gRPC interceptor to key buckets by client ID (e.g., API key hash).
+
+---
+
+## Trust-Aware Retrieval
+
+Membrane's security model uses **sensitivity levels** to control access to records.
+
+### Sensitivity Levels
+
+| Level | Description | Example Use Case |
+|-------|-------------|------------------|
+| `public` | No restrictions | General knowledge, public APIs |
+| `low` | Default for most records | Non-sensitive user data |
+| `medium` | Sensitive but not critical | Internal tool outputs |
+| `high` | Highly sensitive | API keys, credentials |
+| `hyper` | Maximum sensitivity | Production secrets, PII |
+
+### Trust Context
+
+Retrieve requests include a `TrustContext` specifying the caller's maximum access level:
+
+```go
+resp, _ := m.Retrieve(ctx, &retrieval.RetrieveRequest{
+    TaskDescriptor: "deploy to production",
+    Trust: &retrieval.TrustContext{
+        MaxSensitivity: schema.SensitivityMedium,
+        Authenticated:  true,
+        ActorID:        "deploy-agent",
+        Scopes:         []string{"project-acme"},
+    },
+})
+```
+
+### Filtering Behavior
+
+1. **Records at or below `MaxSensitivity`**: Returned with full payload
+2. **Records one level above**: Returned **redacted** (metadata only, no payload)
+3. **Records two+ levels above**: Not returned at all
+
+Example:
+
+- `MaxSensitivity = medium`
+- `public`, `low`, `medium` records: Full payload
+- `high` records: Redacted (ID, type, confidence, but no payload)
+- `hyper` records: Filtered out
+
+<Note>
+Redacted records allow the caller to know that relevant high-sensitivity information exists without exposing the content.
+</Note>
+
+### Setting Sensitivity on Ingest
+
+```go
+req := ingestion.IngestObservationRequest{
+    Source:      "auth-service",
+    Subject:     "user-123",
+    Predicate:   "api_key",
+    Object:      "sk-...",
+    Sensitivity: schema.SensitivityHigh,  // Explicit override
+}
+```
+
+Or use the default from config:
+
+```yaml config.yaml
+default_sensitivity: low
+```
+
+### Scopes
+
+Scopes provide additional filtering beyond sensitivity:
+
+```go
+Trust: &retrieval.TrustContext{
+    MaxSensitivity: schema.SensitivityHigh,
+    Scopes:         []string{"project-acme", "team-infra"},
+}
+```
+
+Only records with a matching `scope` field are returned. If `Scopes` is empty, all scopes are included.
+
+---
+
+## Input Validation
+
+Membrane validates all ingestion requests to prevent injection and DoS attacks.
+
+### Validation Rules
+
+| Field | Limit | Error |
+|-------|-------|-------|
+| Payload size | 1 MB | "payload exceeds size limit" |
+| String length (summary, trigger) | 10,000 chars | "string too long" |
+| Tag count | 50 | "too many tags" |
+| Tag length | 256 chars | "tag too long" |
+| Float values | No NaN/Inf | "invalid float value" |
+
+From `pkg/schema/validation.go` (conceptual, check actual implementation):
+
+```go
+func (r *MemoryRecord) Validate() error {
+    if r.Salience < 0 {
+        return fmt.Errorf("salience must be non-negative")
+    }
+    if r.Confidence < 0 || r.Confidence > 1 {
+        return fmt.Errorf("confidence must be in [0, 1]")
+    }
+    if len(r.Tags) > 50 {
+        return fmt.Errorf("too many tags")
+    }
+    // ...
+}
+```
+
+### SQL Injection Protection
+
+Membrane uses **parameterized queries** exclusively:
+
+```go
+// Safe
+res, err := q.ExecContext(ctx,
+    `UPDATE memory_records SET salience = $1 WHERE id = $2`,
+    salience, id,
+)
+
+// Never done (vulnerable)
+query := fmt.Sprintf("UPDATE memory_records SET salience = %f WHERE id = '%s'", salience, id)
+```
+
+---
+
+## Audit Trails
+
+All operations on memory records are logged to the `audit_log` table.
+
+### Audit Log Schema
+
+```sql
+CREATE TABLE audit_log (
+    id BIGSERIAL PRIMARY KEY,
+    record_id TEXT NOT NULL REFERENCES memory_records(id) ON DELETE CASCADE,
+    action TEXT NOT NULL CHECK(action IN ('create','revise','fork','merge','delete','reinforce','decay')),
+    actor TEXT NOT NULL,
+    timestamp TIMESTAMPTZ NOT NULL,
+    rationale TEXT NOT NULL,
+    previous_state_json JSONB
+);
+```
+
+### Query Audit Logs
+
+```sql
+SELECT 
+    action,
+    actor,
+    timestamp,
+    rationale
+FROM audit_log
+WHERE record_id = 'some-record-id'
+ORDER BY timestamp DESC;
+```
+
+Example output:
+
+```
+  action   |    actor    |         timestamp          |     rationale
+-----------+-------------+----------------------------+-------------------
+ reinforce | deploy-agent| 2026-03-13 10:23:45+00     | deployment success
+ revise    | human       | 2026-03-12 14:30:00+00     | updated procedure
+ create    | agent       | 2026-03-10 09:15:00+00     | initial ingest
+```
+
+### Retention Policy
+
+Audit logs are kept indefinitely by default. For compliance or storage reasons, implement a retention policy:
+
+```sql
+DELETE FROM audit_log
+WHERE timestamp < NOW() - INTERVAL '90 days';
+```
+
+Run this as a cron job or scheduled task.
+
+---
+
+## Security Checklist
+
+<Steps>
+  <Step title="Enable encryption at rest">
+    Set `MEMBRANE_ENCRYPTION_KEY` for SQLite or use disk encryption for Postgres.
+  </Step>
+
+  <Step title="Use TLS for gRPC">
+    Set `tls_cert_file` and `tls_key_file` in production.
+  </Step>
+
+  <Step title="Require API key authentication">
+    Set `MEMBRANE_API_KEY` and distribute to authorized clients only.
+  </Step>
+
+  <Step title="Configure rate limiting">
+    Set `rate_limit_per_second` based on expected load.
+  </Step>
+
+  <Step title="Use trust-aware retrieval">
+    Set appropriate `MaxSensitivity` levels for different agent roles.
+  </Step>
+
+  <Step title="Validate all inputs">
+    Membrane does this automatically, but review custom ingestion code.
+  </Step>
+
+  <Step title="Monitor audit logs">
+    Regularly review `audit_log` for suspicious activity.
+  </Step>
+
+  <Step title="Rotate secrets regularly">
+    Change `MEMBRANE_ENCRYPTION_KEY`, `MEMBRANE_API_KEY`, and TLS certs every 90 days.
+  </Step>
+</Steps>
+
+---
+
+## Threat Model
+
+Membrane's security design assumes:
+
+- **Trusted code execution environment**: Membrane runs server-side with no untrusted code
+- **Untrusted clients**: gRPC clients may be malicious or compromised
+- **Untrusted network**: Communication may be eavesdropped or tampered with
+- **Trusted database storage**: Filesystem and database host are physically secure
+
+### What Membrane Protects Against
+
+- **Eavesdropping**: TLS encryption prevents network sniffing
+- **Unauthorized access**: API key authentication and sensitivity filtering
+- **Data exfiltration**: Trust-aware retrieval limits what untrusted callers can read
+- **Injection attacks**: Parameterized queries and input validation
+- **Replay attacks**: Not currently mitigated (consider adding nonces/timestamps)
+
+### What Membrane Does NOT Protect Against
+
+- **Compromised server**: If the Membrane daemon is compromised, all data is accessible
+- **Database-level attacks**: If an attacker has direct database access, encryption keys may be in memory
+- **Side-channel attacks**: Timing attacks, memory dumps, etc.
+- **Insider threats**: Authorized users with valid API keys can access data within their trust level
+
+<Warning>
+Membrane is not designed for zero-trust environments where the server itself is untrusted. For such deployments, use hardware security modules (HSMs) or trusted execution environments (TEEs).
+</Warning>

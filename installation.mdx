@@ -1,0 +1,636 @@
+---
+title: "Installation"
+description: "Complete installation guide covering Go binary, Docker, source builds, and database backend configuration."
+---
+
+Membrane can be deployed as a standalone daemon or embedded as a Go library. This guide covers all installation methods and configuration options.
+
+## Prerequisites
+
+Before installing Membrane, ensure you have the following:
+
+<CardGroup cols={2}>
+  <Card title="Go 1.22+" icon="golang">
+    Required for building from source or using as a library
+    
+    ```bash
+    go version
+    # Should show 1.22 or later
+    ```
+  </Card>
+  
+  <Card title="Make" icon="hammer">
+    Build automation tool
+    
+    ```bash
+    make --version
+    ```
+  </Card>
+  
+  <Card title="Protocol Buffers (Optional)" icon="file-code">
+    Required only for gRPC development
+    
+    ```bash
+    protoc --version
+    # Should show 3.20 or later
+    ```
+  </Card>
+  
+  <Card title="Node.js 20+ (Optional)" icon="node-js">
+    Required only for TypeScript client SDK development
+    
+    ```bash
+    node --version
+    ```
+  </Card>
+</CardGroup>
+
+## Installation Methods
+
+### Option 1: Build from Source
+
+The recommended method for most users:
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/GustyCube/membrane.git
+    cd membrane
+    ```
+  </Step>
+  
+  <Step title="Build the daemon">
+    ```bash
+    make build
+    ```
+    
+    This creates the `bin/membraned` binary.
+  </Step>
+  
+  <Step title="Verify the build">
+    ```bash
+    ./bin/membraned --version
+    ```
+  </Step>
+  
+  <Step title="Run tests (optional)">
+    ```bash
+    make test
+    ```
+  </Step>
+</Steps>
+
+### Option 2: Docker Deployment
+
+Run Membrane with Docker Compose for quick setup with Postgres:
+
+<Steps>
+  <Step title="Create docker-compose.yml">
+    ```yaml
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        environment:
+          POSTGRES_DB: membrane_test
+          POSTGRES_USER: membrane
+          POSTGRES_PASSWORD: membrane
+        ports:
+          - "5432:5432"
+        volumes:
+          - postgres_data:/var/lib/postgresql/data
+      
+      membraned:
+        image: ghcr.io/gustycube/membrane:latest
+        ports:
+          - "9090:9090"
+        environment:
+          MEMBRANE_POSTGRES_DSN: postgres://membrane:membrane@postgres:5432/membrane_test?sslmode=disable
+        depends_on:
+          - postgres
+    
+    volumes:
+      postgres_data:
+    ```
+  </Step>
+  
+  <Step title="Start services">
+    ```bash
+    docker-compose up -d
+    ```
+  </Step>
+  
+  <Step title="Verify the daemon is running">
+    ```bash
+    docker-compose ps
+    docker-compose logs membraned
+    ```
+  </Step>
+</Steps>
+
+### Option 3: Go Library (Embedded)
+
+Use Membrane as an embedded library in your Go application:
+
+<Steps>
+  <Step title="Add dependency">
+    ```bash
+    go get github.com/GustyCube/membrane
+    ```
+  </Step>
+  
+  <Step title="Import and initialize">
+    ```go
+    package main
+
+    import (
+        "context"
+        "log"
+
+        "github.com/GustyCube/membrane/pkg/membrane"
+    )
+
+    func main() {
+        cfg := membrane.DefaultConfig()
+        cfg.DBPath = "my-agent.db"
+
+        m, err := membrane.New(cfg)
+        if err != nil {
+            log.Fatal(err)
+        }
+        defer m.Stop()
+
+        ctx := context.Background()
+        if err := m.Start(ctx); err != nil {
+            log.Fatal(err)
+        }
+
+        // Use m.IngestEvent, m.Retrieve, etc.
+    }
+    ```
+  </Step>
+</Steps>
+
+## Database Backends
+
+Membrane supports two storage backends: SQLite (default) and PostgreSQL with pgvector.
+
+### SQLite Backend (Default)
+
+The SQLite backend is optimized for single-writer embedded scenarios:
+
+<CodeGroup>
+
+```bash Command Line
+./bin/membraned --db /path/to/membrane.db
+```
+
+```go Go Library
+cfg := membrane.DefaultConfig()
+cfg.Backend = "sqlite"
+cfg.DBPath = "membrane.db"
+
+m, err := membrane.New(cfg)
+```
+
+```yaml Configuration File
+backend: "sqlite"
+db_path: "membrane.db"
+```
+
+</CodeGroup>
+
+**Features:**
+- Zero-dependency embedded storage
+- SQLCipher encryption at rest (optional)
+- Ideal for single-agent scenarios
+- Confidence-based applicability fallback for competence/plan-graph selection
+
+<Warning>
+  SQLite is **single-writer only**. For concurrent access from multiple processes, use the Postgres backend.
+</Warning>
+
+### Postgres Backend
+
+The Postgres backend enables concurrent writes and optional vector similarity search:
+
+<Steps>
+  <Step title="Start Postgres with pgvector">
+    Using Docker:
+    
+    ```bash
+    docker run -d \
+      --name membrane-postgres \
+      -e POSTGRES_DB=membrane \
+      -e POSTGRES_USER=membrane \
+      -e POSTGRES_PASSWORD=membrane \
+      -p 5432:5432 \
+      pgvector/pgvector:pg16
+    ```
+    
+    Or use the provided docker-compose.yml from the repository.
+  </Step>
+  
+  <Step title="Configure the connection">
+    <CodeGroup>
+    
+    ```bash Command Line
+    ./bin/membraned \
+      --postgres-dsn "postgres://membrane:membrane@localhost:5432/membrane?sslmode=disable"
+    ```
+    
+    ```yaml Configuration File
+    backend: "postgres"
+    postgres_dsn: "postgres://membrane:membrane@localhost:5432/membrane?sslmode=disable"
+    ```
+    
+    ```bash Environment Variable
+    export MEMBRANE_POSTGRES_DSN="postgres://membrane:membrane@localhost:5432/membrane?sslmode=disable"
+    ./bin/membraned
+    ```
+    
+    </CodeGroup>
+  </Step>
+  
+  <Step title="Verify the connection">
+    Check the logs for successful connection:
+    
+    ```bash
+    ./bin/membraned --postgres-dsn "postgres://..." 2>&1 | grep "postgres"
+    ```
+  </Step>
+</Steps>
+
+**Features:**
+- Concurrent writer support
+- JSONB storage for structured payloads
+- Optional pgvector for embedding-based retrieval
+- Production-ready for multi-agent deployments
+
+## Configuration
+
+Membrane can be configured through YAML files, command-line flags, or environment variables.
+
+### Configuration File
+
+Create a `config.yaml` file:
+
+```yaml
+# Storage backend
+backend: "sqlite"
+db_path: "membrane.db"
+# postgres_dsn: "postgres://membrane:membrane@localhost:5432/membrane?sslmode=disable"
+
+# Server settings
+listen_addr: ":9090"
+
+# Scheduler intervals
+decay_interval: "1h"
+consolidation_interval: "6h"
+
+# Ingestion defaults
+default_sensitivity: "low"
+selection_confidence_threshold: 0.7
+
+# Security (use environment variables for sensitive values)
+# encryption_key: ""       # or set MEMBRANE_ENCRYPTION_KEY
+# api_key: ""              # or set MEMBRANE_API_KEY
+# tls_cert_file: ""
+# tls_key_file: ""
+rate_limit_per_second: 100
+
+# Optional embedding-backed retrieval (Postgres only)
+# embedding_endpoint: "https://api.openai.com/v1/embeddings"
+# embedding_model: "text-embedding-3-small"
+# embedding_dimensions: 1536
+# embedding_api_key: ""   # or set MEMBRANE_EMBEDDING_API_KEY
+
+# Optional LLM-backed semantic extraction (Postgres only)
+# llm_endpoint: "https://api.openai.com/v1/chat/completions"
+# llm_model: "gpt-5-mini"
+# llm_api_key: ""         # or set MEMBRANE_LLM_API_KEY
+```
+
+Load the configuration:
+
+```bash
+./bin/membraned --config config.yaml
+```
+
+### Environment Variables
+
+Environment variables take precedence over configuration file values:
+
+| Variable | Purpose |
+|----------|---------|
+| `MEMBRANE_ENCRYPTION_KEY` | SQLCipher encryption key for the SQLite database |
+| `MEMBRANE_POSTGRES_DSN` | PostgreSQL connection string (activates postgres backend) |
+| `MEMBRANE_EMBEDDING_API_KEY` | API key for the embedding endpoint |
+| `MEMBRANE_LLM_API_KEY` | API key for the semantic extraction LLM endpoint |
+| `MEMBRANE_API_KEY` | Bearer token for gRPC client authentication |
+
+Example usage:
+
+```bash
+export MEMBRANE_ENCRYPTION_KEY="my-secret-key-32-bytes-long!!"
+export MEMBRANE_API_KEY="agent-api-key-here"
+./bin/membraned
+```
+
+### Command-Line Flags
+
+Override configuration with command-line flags:
+
+```bash
+./bin/membraned \
+  --config /path/to/config.yaml \
+  --db /custom/path/membrane.db \
+  --addr :8080
+```
+
+**Available flags:**
+
+| Flag | Description | Example |
+|------|-------------|---------|
+| `--config` | Path to YAML config file | `--config /etc/membrane/config.yaml` |
+| `--db` | SQLite database path (overrides config) | `--db /data/membrane.db` |
+| `--postgres-dsn` | PostgreSQL DSN (selects postgres backend) | `--postgres-dsn postgres://...` |
+| `--addr` | gRPC listen address | `--addr :8080` |
+| `--version` | Print version and exit | `--version` |
+
+## Deployment Tiers
+
+Membrane supports four deployment tiers with increasing capabilities:
+
+| Tier | Backend | Embedding | LLM | Behavior |
+|------|---------|-----------|-----|----------|
+| **Tier 1** | SQLite | - | - | Zero-infra default, confidence-based applicability fallback |
+| **Tier 2** | Postgres | - | - | Concurrent writers, JSONB storage, same retrieval semantics as tier 1 |
+| **Tier 3** | Postgres + pgvector | Yes | - | Embedding-based applicability scoring for competence and plan_graph selection |
+| **Tier 4** | Postgres + pgvector | Yes | Yes | Full system with LLM-backed episodic to semantic extraction |
+
+### Tier 1: SQLite (Default)
+
+```bash
+./bin/membraned
+```
+
+Best for: Single-agent scenarios, development, embedded deployments.
+
+### Tier 2: Postgres
+
+```bash
+./bin/membraned \
+  --postgres-dsn "postgres://membrane:membrane@localhost:5432/membrane?sslmode=disable"
+```
+
+Best for: Multi-agent systems, production deployments without vector retrieval.
+
+### Tier 3: Postgres + Embeddings
+
+```yaml
+backend: "postgres"
+postgres_dsn: "postgres://membrane:membrane@localhost:5432/membrane?sslmode=disable"
+embedding_endpoint: "https://api.openai.com/v1/embeddings"
+embedding_model: "text-embedding-3-small"
+embedding_dimensions: 1536
+```
+
+```bash
+export MEMBRANE_EMBEDDING_API_KEY="sk-..."
+./bin/membraned --config config.yaml
+```
+
+Best for: Systems requiring semantic similarity search for competence and plan graph retrieval.
+
+### Tier 4: Full System
+
+```yaml
+backend: "postgres"
+postgres_dsn: "postgres://membrane:membrane@localhost:5432/membrane?sslmode=disable"
+
+# Embedding configuration
+embedding_endpoint: "https://api.openai.com/v1/embeddings"
+embedding_model: "text-embedding-3-small"
+embedding_dimensions: 1536
+
+# LLM configuration
+llm_endpoint: "https://api.openai.com/v1/chat/completions"
+llm_model: "gpt-5-mini"
+```
+
+```bash
+export MEMBRANE_EMBEDDING_API_KEY="sk-..."
+export MEMBRANE_LLM_API_KEY="sk-..."
+./bin/membraned --config config.yaml
+```
+
+Best for: Advanced systems with automatic semantic fact extraction from episodic traces.
+
+## Security Configuration
+
+### SQLCipher Encryption
+
+Encrypt your SQLite database at rest:
+
+```bash
+export MEMBRANE_ENCRYPTION_KEY="my-32-byte-encryption-key-here!"
+./bin/membraned
+```
+
+<Note>
+  The encryption key must be exactly 32 bytes for SQLCipher compatibility.
+</Note>
+
+### TLS Transport
+
+Enable TLS for gRPC connections:
+
+```yaml
+tls_cert_file: "/path/to/server.crt"
+tls_key_file: "/path/to/server.key"
+```
+
+Generate self-signed certificates for testing:
+
+```bash
+openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes
+```
+
+### API Key Authentication
+
+Protect your gRPC endpoint with API key authentication:
+
+```bash
+export MEMBRANE_API_KEY="your-secure-api-key"
+./bin/membraned
+```
+
+Clients must include the API key in the `authorization` metadata header:
+
+```go
+import "google.golang.org/grpc/metadata"
+
+ctx := metadata.AppendToOutgoingContext(context.Background(), 
+    "authorization", "Bearer your-secure-api-key")
+```
+
+### Rate Limiting
+
+Configure rate limits to prevent abuse:
+
+```yaml
+rate_limit_per_second: 100
+```
+
+## Verifying Installation
+
+Check that Membrane is running correctly:
+
+<Steps>
+  <Step title="Check daemon status">
+    ```bash
+    # The daemon should log startup messages
+    ./bin/membraned
+    # Expected output:
+    # membraned: listening on :9090
+    ```
+  </Step>
+  
+  <Step title="Run health check">
+    Use a gRPC client to verify connectivity:
+    
+    ```bash
+    # Install grpcurl if needed
+    go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+    
+    # List available services
+    grpcurl -plaintext localhost:9090 list
+    ```
+  </Step>
+  
+  <Step title="Run test suite">
+    ```bash
+    make test
+    ```
+    
+    Expected output: All tests pass (typically ~0.4s for unit tests).
+  </Step>
+  
+  <Step title="Run evaluation suite">
+    ```bash
+    make eval-all
+    ```
+    
+    This runs comprehensive capability evaluations including memory type handling, revision semantics, and trust-gated retrieval.
+  </Step>
+</Steps>
+
+## Background Jobs
+
+Membrane runs three background schedulers:
+
+| Job | Default Interval | Purpose |
+|-----|-----------------|---------|
+| **Decay** | 1 hour | Applies time-based salience decay using an exponential curve |
+| **Pruning** | With decay | Deletes records with `auto_prune` policy whose salience has reached 0 |
+| **Consolidation** | 6 hours | Runs semantic consolidation, competence extraction, and plan-graph extraction |
+
+Configure intervals in your config file:
+
+```yaml
+decay_interval: "30m"
+consolidation_interval: "3h"
+```
+
+## Troubleshooting
+
+### Database locked error (SQLite)
+
+**Problem:** `database is locked` error when accessing SQLite from multiple processes.
+
+**Solution:** Use the Postgres backend for concurrent access:
+
+```bash
+./bin/membraned --postgres-dsn "postgres://..."
+```
+
+### Connection refused (Postgres)
+
+**Problem:** `connection refused` when connecting to Postgres.
+
+**Solution:** Ensure Postgres is running and accessible:
+
+```bash
+docker ps  # Check if Postgres container is running
+psql -h localhost -U membrane -d membrane  # Test connection
+```
+
+### Port already in use
+
+**Problem:** `address already in use` error on startup.
+
+**Solution:** Change the listen address:
+
+```bash
+./bin/membraned --addr :8080
+```
+
+Or find and stop the process using port 9090:
+
+```bash
+lsof -i :9090
+kill -9 <PID>
+```
+
+### Embedding API errors
+
+**Problem:** Embedding generation fails with authentication errors.
+
+**Solution:** Verify your API key is set correctly:
+
+```bash
+echo $MEMBRANE_EMBEDDING_API_KEY  # Should show your key
+```
+
+Ensure the endpoint and model are compatible:
+
+```yaml
+embedding_endpoint: "https://api.openai.com/v1/embeddings"
+embedding_model: "text-embedding-3-small"
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card
+    title="Quickstart Guide"
+    icon="rocket"
+    href="/quickstart"
+  >
+    Learn basic ingestion and retrieval operations
+  </Card>
+  
+  <Card
+    title="Configuration Guide"
+    icon="gear"
+    href="/guides/configuration"
+  >
+    Deep dive into advanced configuration options
+  </Card>
+  
+  <Card
+    title="LLM Integration"
+    icon="brain"
+    href="/guides/llm-integration"
+  >
+    Integrate Membrane with your LLM orchestration layer
+  </Card>
+  
+  <Card
+    title="Client SDKs"
+    icon="code"
+    href="/clients/typescript"
+  >
+    Install and use TypeScript, Python, or Go clients
+  </Card>
+</CardGroup>

@@ -1,0 +1,433 @@
+---
+title: Daemon Deployment
+description: Run Membrane as a standalone gRPC service
+---
+
+Membrane can run as a long-lived daemon (`membraned`) that exposes a gRPC API. This is ideal for multi-language clients, distributed systems, or when you want to separate the memory substrate from your application.
+
+## Building the Daemon
+
+<Steps>
+  <Step title="Clone and build">
+    ```bash
+    git clone https://github.com/GustyCube/membrane.git
+    cd membrane
+    make build
+    ```
+
+    This produces `./bin/membraned`.
+  </Step>
+
+  <Step title="Verify installation">
+    ```bash
+    ./bin/membraned --version
+    ```
+  </Step>
+</Steps>
+
+## Running the Daemon
+
+### Default Configuration
+
+Start with SQLite storage and default settings:
+
+```bash
+./bin/membraned
+```
+
+This listens on `:9090` and creates `membrane.db` in the current directory.
+
+### Command-Line Flags
+
+Override configuration with flags:
+
+```bash
+./bin/membraned \
+  --db /var/lib/membrane/membrane.db \
+  --addr :8080
+```
+
+<Note>
+Command-line flags override values from the config file.
+</Note>
+
+### Available Flags
+
+| Flag | Description | Example |
+|------|-------------|----------|
+| `--config` | Path to YAML config file | `--config /etc/membrane/config.yaml` |
+| `--db` | SQLite database path | `--db /data/membrane.db` |
+| `--postgres-dsn` | PostgreSQL DSN (selects postgres backend) | `--postgres-dsn postgres://user:pass@host/db` |
+| `--addr` | gRPC listen address | `--addr :8080` |
+| `--version` | Print version and exit | `--version` |
+
+### Configuration File
+
+Create a YAML configuration file for production deployments:
+
+```yaml
+backend: "sqlite"
+db_path: "/var/lib/membrane/membrane.db"
+listen_addr: ":9090"
+decay_interval: "1h"
+consolidation_interval: "6h"
+default_sensitivity: "low"
+selection_confidence_threshold: 0.7
+rate_limit_per_second: 100
+```
+
+Then start with:
+
+```bash
+./bin/membraned --config /etc/membrane/config.yaml
+```
+
+See the [Configuration guide](/guides/configuration) for all available options.
+
+## PostgreSQL Backend
+
+For production deployments with concurrent writers, use Postgres:
+
+```bash
+./bin/membraned \
+  --postgres-dsn "postgres://membrane:password@localhost:5432/membrane?sslmode=require"
+```
+
+Or via environment variable:
+
+```bash
+export MEMBRANE_POSTGRES_DSN="postgres://membrane:password@localhost:5432/membrane?sslmode=require"
+./bin/membraned
+```
+
+### Using Docker Compose
+
+The repository includes a Docker Compose setup for Postgres with pgvector:
+
+```yaml
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: membrane_test
+      POSTGRES_USER: membrane
+      POSTGRES_PASSWORD: membrane
+    ports:
+      - "5432:5432"
+```
+
+Start Postgres:
+
+```bash
+docker-compose up -d
+```
+
+Then connect Membrane:
+
+```bash
+./bin/membraned --postgres-dsn "postgres://membrane:membrane@localhost:5432/membrane_test?sslmode=disable"
+```
+
+## Security Configuration
+
+### API Key Authentication
+
+Enable authentication with a bearer token:
+
+```bash
+export MEMBRANE_API_KEY="your-secret-key-here"
+./bin/membraned
+```
+
+Clients must send the key in the `authorization` metadata:
+
+```
+authorization: Bearer your-secret-key-here
+```
+
+### TLS/SSL
+
+Enable TLS for encrypted transport:
+
+```yaml
+tls_cert_file: "/etc/membrane/certs/server.crt"
+tls_key_file: "/etc/membrane/certs/server.key"
+```
+
+### Database Encryption
+
+For SQLite, enable SQLCipher encryption:
+
+```bash
+export MEMBRANE_ENCRYPTION_KEY="32-byte-encryption-key-here"
+./bin/membraned --db /secure/membrane.db
+```
+
+<Note>
+The encryption key must be 32 bytes for SQLCipher. Store it securely in a secrets manager.
+</Note>
+
+### Rate Limiting
+
+Protect against abuse with rate limiting:
+
+```yaml
+rate_limit_per_second: 100
+```
+
+This applies a token bucket limiter per client connection.
+
+## Docker Deployment
+
+Create a Dockerfile for containerized deployment:
+
+```dockerfile
+FROM golang:1.22-alpine AS builder
+WORKDIR /build
+COPY . .
+RUN apk add --no-cache make git && make build
+
+FROM alpine:latest
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /build/bin/membraned /usr/local/bin/
+EXPOSE 9090
+CMD ["membraned"]
+```
+
+Build and run:
+
+```bash
+docker build -t membraned:latest .
+docker run -d \
+  -p 9090:9090 \
+  -v /data/membrane:/data \
+  -e MEMBRANE_API_KEY=your-secret-key \
+  membraned:latest \
+  --db /data/membrane.db
+```
+
+## Systemd Service
+
+Run Membrane as a system service:
+
+<Steps>
+  <Step title="Create service file">
+    Create `/etc/systemd/system/membraned.service`:
+
+    ```ini
+    [Unit]
+    Description=Membrane Memory Substrate
+    After=network.target
+
+    [Service]
+    Type=simple
+    User=membrane
+    Group=membrane
+    WorkingDirectory=/var/lib/membrane
+    ExecStart=/usr/local/bin/membraned --config /etc/membrane/config.yaml
+    Restart=on-failure
+    RestartSec=5s
+    
+    # Security hardening
+    NoNewPrivileges=true
+    PrivateTmp=true
+    ProtectSystem=strict
+    ProtectHome=true
+    ReadWritePaths=/var/lib/membrane
+    
+    # Environment
+    EnvironmentFile=-/etc/membrane/environment
+
+    [Install]
+    WantedBy=multi-user.target
+    ```
+  </Step>
+
+  <Step title="Create user and directories">
+    ```bash
+    sudo useradd -r -s /bin/false membrane
+    sudo mkdir -p /var/lib/membrane /etc/membrane
+    sudo chown membrane:membrane /var/lib/membrane
+    ```
+  </Step>
+
+  <Step title="Create environment file">
+    Create `/etc/membrane/environment` for secrets:
+
+    ```bash
+    MEMBRANE_API_KEY=your-secret-key-here
+    MEMBRANE_ENCRYPTION_KEY=your-encryption-key-here
+    ```
+
+    Secure the file:
+
+    ```bash
+    sudo chmod 600 /etc/membrane/environment
+    sudo chown membrane:membrane /etc/membrane/environment
+    ```
+  </Step>
+
+  <Step title="Enable and start service">
+    ```bash
+    sudo systemctl daemon-reload
+    sudo systemctl enable membraned
+    sudo systemctl start membraned
+    ```
+  </Step>
+
+  <Step title="Check status">
+    ```bash
+    sudo systemctl status membraned
+    sudo journalctl -u membraned -f
+    ```
+  </Step>
+</Steps>
+
+## Health Checks
+
+### gRPC Health Check
+
+The daemon automatically registers a gRPC health check endpoint. Use `grpc-health-probe`:
+
+```bash
+# Install grpc-health-probe
+wget -qO /usr/local/bin/grpc-health-probe \
+  https://github.com/grpc-ecosystem/grpc-health-probe/releases/latest/download/grpc-health-probe-linux-amd64
+chmod +x /usr/local/bin/grpc-health-probe
+
+# Check health
+grpc-health-probe -addr=localhost:9090
+```
+
+### Kubernetes Liveness Probe
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: membraned
+spec:
+  containers:
+  - name: membraned
+    image: membraned:latest
+    ports:
+    - containerPort: 9090
+    livenessProbe:
+      exec:
+        command: ["/bin/grpc-health-probe", "-addr=:9090"]
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    readinessProbe:
+      exec:
+        command: ["/bin/grpc-health-probe", "-addr=:9090"]
+      initialDelaySeconds: 3
+      periodSeconds: 5
+```
+
+## Monitoring
+
+The daemon exposes metrics via the `GetMetrics` gRPC endpoint. See the [Observability guide](/guides/observability) for details.
+
+## Graceful Shutdown
+
+The daemon handles `SIGINT` and `SIGTERM` signals gracefully:
+
+1. Stops accepting new requests
+2. Cancels background schedulers (decay, consolidation)
+3. Waits for in-flight gRPC requests to complete
+4. Closes database connections
+
+```bash
+# Graceful shutdown
+sudo systemctl stop membraned
+
+# Or send signal directly
+kill -SIGTERM $(pidof membraned)
+```
+
+Logs will show:
+
+```
+membraned: received signal terminated, shutting down
+membraned: shutdown complete
+```
+
+## Backup and Recovery
+
+### SQLite Backup
+
+For SQLite deployments, backup the database file:
+
+```bash
+# Online backup (safe while daemon is running)
+sqlite3 /var/lib/membrane/membrane.db ".backup /backup/membrane-$(date +%Y%m%d).db"
+
+# Or use file copy after stopping
+sudo systemctl stop membraned
+cp /var/lib/membrane/membrane.db /backup/membrane-$(date +%Y%m%d).db
+sudo systemctl start membraned
+```
+
+### Postgres Backup
+
+For Postgres deployments:
+
+```bash
+pg_dump -h localhost -U membrane membrane > membrane-backup-$(date +%Y%m%d).sql
+```
+
+## Troubleshooting
+
+### Check Logs
+
+```bash
+# Systemd
+sudo journalctl -u membraned -n 100
+
+# Docker
+docker logs membraned
+```
+
+### Connection Issues
+
+Verify the daemon is listening:
+
+```bash
+netstat -tlnp | grep 9090
+# or
+ss -tlnp | grep 9090
+```
+
+### Permission Errors
+
+Ensure the membrane user has write access:
+
+```bash
+sudo chown -R membrane:membrane /var/lib/membrane
+sudo chmod 755 /var/lib/membrane
+```
+
+### Database Lock Issues (SQLite)
+
+If using SQLite with multiple processes:
+
+- Use Postgres backend for concurrent access
+- Check for stale lock files: `rm /var/lib/membrane/membrane.db-wal`
+- Ensure only one instance is running
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="sliders" href="/guides/configuration">
+    Complete configuration reference
+  </Card>
+  <Card title="Observability" icon="chart-line" href="/guides/observability">
+    Monitor and metrics collection
+  </Card>
+  <Card title="gRPC Clients" icon="code" href="/api/overview">
+    Use TypeScript or Python clients
+  </Card>
+  <Card title="Security" icon="shield" href="/advanced/security">
+    Authentication and encryption setup
+  </Card>
+</CardGroup>

@@ -1,0 +1,387 @@
+---
+title: Embedded Usage
+description: Use Membrane as an embedded Go library in your application
+---
+
+Membrane can be embedded directly into your Go application without running a separate daemon. This gives you full control over the memory substrate lifecycle and removes the need for gRPC communication.
+
+## Installation
+
+Add Membrane to your Go module:
+
+```bash
+go get github.com/GustyCube/membrane
+```
+
+## Basic Setup
+
+<Steps>
+  <Step title="Import the library">
+    Import the core packages you'll need:
+
+    ```go
+    import (
+        "context"
+        "log"
+
+        "github.com/GustyCube/membrane/pkg/ingestion"
+        "github.com/GustyCube/membrane/pkg/membrane"
+        "github.com/GustyCube/membrane/pkg/retrieval"
+        "github.com/GustyCube/membrane/pkg/schema"
+    )
+    ```
+  </Step>
+
+  <Step title="Create a configuration">
+    Start with the default configuration and customize as needed:
+
+    ```go
+    cfg := membrane.DefaultConfig()
+    cfg.DBPath = "my-agent.db"
+    cfg.Backend = "sqlite"  // or "postgres"
+    cfg.DefaultSensitivity = "low"
+    cfg.DecayInterval = time.Hour
+    cfg.ConsolidationInterval = 6 * time.Hour
+    ```
+
+    <Note>
+      The default backend is SQLite with no encryption. See the [Configuration guide](/guides/configuration) for encryption and Postgres options.
+    </Note>
+  </Step>
+
+  <Step title="Initialize Membrane">
+    Create a new Membrane instance and start background schedulers:
+
+    ```go
+    m, err := membrane.New(cfg)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer m.Stop()
+
+    ctx := context.Background()
+    if err := m.Start(ctx); err != nil {
+        log.Fatal(err)
+    }
+    ```
+
+    The `Start` method launches background jobs for decay and consolidation.
+  </Step>
+</Steps>
+
+## Ingesting Memory
+
+Membrane provides type-specific ingestion methods for each memory type.
+
+### Episodic Events
+
+Capture raw experiences like errors, observations, or user interactions:
+
+```go
+rec, err := m.IngestEvent(ctx, ingestion.IngestEventRequest{
+    Source:    "build-agent",
+    EventKind: "tool_call",
+    Ref:       "build#42",
+    Summary:   "Executed go build, failed with linker error",
+    Tags:      []string{"build", "error"},
+})
+if err != nil {
+    log.Printf("Failed to ingest event: %v", err)
+}
+fmt.Printf("Ingested episodic record: %s\n", rec.ID)
+```
+
+### Tool Outputs
+
+Capture tool invocations with arguments and results:
+
+```go
+rec, err := m.IngestToolOutput(ctx, ingestion.IngestToolOutputRequest{
+    Source:   "agent",
+    ToolName: "run_command",
+    Args: map[string]any{
+        "command": "go build",
+        "args":    []string{"-v", "./..."},
+    },
+    Result: map[string]any{
+        "exit_code": 0,
+        "stdout":    "Build successful",
+    },
+    Tags: []string{"build"},
+})
+```
+
+### Semantic Observations
+
+Store stable facts and preferences as subject-predicate-object triples:
+
+```go
+rec, err := m.IngestObservation(ctx, ingestion.IngestObservationRequest{
+    Source:    "build-agent",
+    Subject:   "user",
+    Predicate: "prefers_language",
+    Object:    "go",
+    Tags:      []string{"preferences"},
+})
+```
+
+### Working Memory State
+
+Capture the current task state for resumption:
+
+```go
+rec, err := m.IngestWorkingState(ctx, ingestion.IngestWorkingStateRequest{
+    Source:      "build-agent",
+    ThreadID:    "session-001",
+    State:       schema.TaskStateExecuting,
+    NextActions: []string{"run tests", "deploy"},
+    OpenQuestions: []string{
+        "Should we deploy to staging first?",
+    },
+    ContextSummary: "Building backend service, tests pending",
+})
+```
+
+### Recording Outcomes
+
+Update episodic records with outcome data:
+
+```go
+rec, err := m.IngestOutcome(ctx, ingestion.IngestOutcomeRequest{
+    Source:         "build-agent",
+    TargetRecordID: episodicRecordID,
+    OutcomeStatus:  schema.OutcomeStatusSuccess,
+})
+```
+
+## Retrieving Memory
+
+Retrieve memory with trust context and type filtering:
+
+```go
+resp, err := m.Retrieve(ctx, &retrieval.RetrieveRequest{
+    TaskDescriptor: "fix build error",
+    Trust: &retrieval.TrustContext{
+        MaxSensitivity: schema.SensitivityMedium,
+        Authenticated:  true,
+        ActorID:        "build-agent",
+        Scopes:         []string{"project-backend"},
+    },
+    MemoryTypes: []schema.MemoryType{
+        schema.MemoryTypeCompetence,
+        schema.MemoryTypeSemantic,
+        schema.MemoryTypeEpisodic,
+    },
+    MinSalience: 0.3,
+    Limit:       20,
+})
+
+if err != nil {
+    log.Printf("Retrieval failed: %v", err)
+}
+
+for _, r := range resp.Records {
+    fmt.Printf("Found: %s (type=%s, confidence=%.2f, salience=%.2f)\n",
+        r.ID, r.Type, r.Confidence, r.Salience)
+}
+```
+
+### Retrieve by ID
+
+Fetch a specific record with trust checks:
+
+```go
+record, err := m.RetrieveByID(ctx, recordID, &retrieval.TrustContext{
+    MaxSensitivity: schema.SensitivityHigh,
+    Authenticated:  true,
+    ActorID:        "admin",
+})
+```
+
+## Revision Operations
+
+Membrane supports five revision operations with full audit trails:
+
+### Supersede
+
+Replace an existing record with a new version:
+
+```go
+newRec := &schema.MemoryRecord{
+    Type:        schema.MemoryTypeSemantic,
+    Sensitivity: schema.SensitivityLow,
+    Confidence:  0.95,
+    Salience:    1.0,
+    Payload: &schema.SemanticPayload{
+        Kind:      "semantic",
+        Subject:   "user",
+        Predicate: "prefers_language",
+        Object:    "rust",  // Updated preference
+    },
+}
+
+superseded, err := m.Supersede(ctx, oldRecordID, newRec, "agent", "User preference changed")
+```
+
+### Fork
+
+Create a conditional variant:
+
+```go
+forked, err := m.Fork(ctx, sourceID, conditionalRec, "agent", 
+    "Different configuration for dev environment")
+```
+
+### Contest
+
+Mark a record as contested due to conflicting evidence:
+
+```go
+err := m.Contest(ctx, recordID, conflictingRecordID, "agent", 
+    "New evidence contradicts this claim")
+```
+
+### Retract
+
+Withdraw a record that's no longer valid:
+
+```go
+err := m.Retract(ctx, recordID, "agent", "Information outdated")
+```
+
+### Merge
+
+Consolidate multiple records into one:
+
+```go
+merged, err := m.Merge(ctx, 
+    []string{id1, id2, id3}, 
+    mergedRec, 
+    "agent", 
+    "Consolidating duplicate observations")
+```
+
+## Reinforcement
+
+Boost or reduce salience based on usefulness:
+
+```go
+// Reinforce a useful record
+err := m.Reinforce(ctx, recordID, "agent", "Successfully used in task")
+
+// Penalize an unhelpful record
+err := m.Penalize(ctx, recordID, 0.2, "agent", "Led to incorrect solution")
+```
+
+## Complete Example
+
+Here's a full agent that ingests tool calls, retrieves relevant memory, and reinforces useful records:
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+
+    "github.com/GustyCube/membrane/pkg/ingestion"
+    "github.com/GustyCube/membrane/pkg/membrane"
+    "github.com/GustyCube/membrane/pkg/retrieval"
+    "github.com/GustyCube/membrane/pkg/schema"
+)
+
+func main() {
+    cfg := membrane.DefaultConfig()
+    cfg.DBPath = "my-agent.db"
+
+    m, err := membrane.New(cfg)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer m.Stop()
+
+    ctx := context.Background()
+    m.Start(ctx)
+
+    // Ingest an episodic event (tool call observation)
+    rec, _ := m.IngestEvent(ctx, ingestion.IngestEventRequest{
+        Source:    "build-agent",
+        EventKind: "tool_call",
+        Ref:       "build#42",
+        Summary:   "Executed go build, failed with linker error",
+        Tags:      []string{"build", "error"},
+    })
+    fmt.Printf("Ingested episodic record: %s\n", rec.ID)
+
+    // Ingest a semantic observation
+    m.IngestObservation(ctx, ingestion.IngestObservationRequest{
+        Source:    "build-agent",
+        Subject:   "user",
+        Predicate: "prefers_language",
+        Object:    "go",
+        Tags:      []string{"preferences"},
+    })
+
+    // Ingest working memory state
+    m.IngestWorkingState(ctx, ingestion.IngestWorkingStateRequest{
+        Source:      "build-agent",
+        ThreadID:    "session-001",
+        State:       schema.TaskStateExecuting,
+        NextActions: []string{"run tests", "deploy"},
+    })
+
+    // Retrieve with trust context
+    resp, _ := m.Retrieve(ctx, &retrieval.RetrieveRequest{
+        TaskDescriptor: "fix build error",
+        Trust: &retrieval.TrustContext{
+            MaxSensitivity: schema.SensitivityMedium,
+            Authenticated:  true,
+        },
+        MemoryTypes: []schema.MemoryType{
+            schema.MemoryTypeCompetence,
+            schema.MemoryTypeSemantic,
+        },
+    })
+
+    for _, r := range resp.Records {
+        fmt.Printf("Found: %s (type=%s, confidence=%.2f)\n", 
+            r.ID, r.Type, r.Confidence)
+    }
+}
+```
+
+## Lifecycle Management
+
+Always clean up resources when shutting down:
+
+```go
+// Graceful shutdown
+func shutdown(m *membrane.Membrane) {
+    if err := m.Stop(); err != nil {
+        log.Printf("Error during shutdown: %v", err)
+    }
+}
+```
+
+The `Stop` method:
+- Stops decay and consolidation schedulers
+- Waits for in-flight operations to complete
+- Closes the database connection
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="sliders" href="/guides/configuration">
+    Learn about all configuration options including encryption and Postgres
+  </Card>
+  <Card title="LLM Integration" icon="brain" href="/guides/llm-integration">
+    Integrate Membrane with LLM prompts and reinforcement loops
+  </Card>
+  <Card title="Observability" icon="chart-line" href="/guides/observability">
+    Monitor memory growth, retrieval usefulness, and competence metrics
+  </Card>
+  <Card title="Daemon Deployment" icon="server" href="/guides/daemon-deployment">
+    Run Membrane as a standalone service with gRPC API
+  </Card>
+</CardGroup>

@@ -1,80 +1,363 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Get started with Membrane in 5 minutes. Install, run, and perform your first memory operations."
 ---
 
-## Get started in three steps
+Membrane is a memory substrate for agentic systems that provides typed, revisable memory with decay and trust-aware retrieval. This guide gets you up and running quickly with both daemon and embedded library usage.
 
-Get your documentation site running locally and make your first customization.
+## Installation
 
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+<Steps>
+  <Step title="Install prerequisites">
+    Ensure you have Go 1.22 or later installed:
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+    ```bash
+    go version
+    ```
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+    <Note>
+      For development work, you'll also need `protoc` (Protocol Buffers compiler) version 3.20 or later.
+    </Note>
+  </Step>
+  
+  <Step title="Clone and build">
+    Clone the repository and build the daemon:
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```bash
+    git clone https://github.com/GustyCube/membrane.git
+    cd membrane
+    make build
+    ```
+    
+    This creates the `bin/membraned` binary.
+  </Step>
+  
+  <Step title="Start the daemon">
+    Run with default SQLite storage:
+    
+    ```bash
+    ./bin/membraned
+    ```
+    
+    The daemon listens on `:9090` by default and creates a `membrane.db` file in the current directory.
+    
+    <Tip>
+      For production use with concurrent writes, consider using [Postgres + pgvector](/installation#postgres-backend).
+    </Tip>
+  </Step>
+</Steps>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+## First Memory Operations
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+Now that the daemon is running, let's perform some basic memory operations using the Go library.
 
-### Step 3: Go live
+### Using the Go Library (Embedded)
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+Create a new Go file to interact with Membrane as an embedded library:
 
-## Next steps
+```go
+package main
 
-Now that you have your docs running, explore these key features:
+import (
+    "context"
+    "fmt"
+    "log"
+
+    "github.com/GustyCube/membrane/pkg/ingestion"
+    "github.com/GustyCube/membrane/pkg/membrane"
+    "github.com/GustyCube/membrane/pkg/retrieval"
+    "github.com/GustyCube/membrane/pkg/schema"
+)
+
+func main() {
+    cfg := membrane.DefaultConfig()
+    cfg.DBPath = "my-agent.db"
+
+    m, err := membrane.New(cfg)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer m.Stop()
+
+    ctx := context.Background()
+    m.Start(ctx)
+
+    // Ingest an episodic event (tool call observation)
+    rec, _ := m.IngestEvent(ctx, ingestion.IngestEventRequest{
+        Source:    "build-agent",
+        EventKind: "tool_call",
+        Ref:       "build#42",
+        Summary:   "Executed go build, failed with linker error",
+        Tags:      []string{"build", "error"},
+    })
+    fmt.Printf("Ingested episodic record: %s\n", rec.ID)
+
+    // Ingest a semantic observation
+    m.IngestObservation(ctx, ingestion.IngestObservationRequest{
+        Source:    "build-agent",
+        Subject:   "user",
+        Predicate: "prefers_language",
+        Object:    "go",
+        Tags:      []string{"preferences"},
+    })
+
+    // Ingest working memory state
+    m.IngestWorkingState(ctx, ingestion.IngestWorkingStateRequest{
+        Source:     "build-agent",
+        ThreadID:   "session-001",
+        State:      schema.TaskStateExecuting,
+        NextActions: []string{"run tests", "deploy"},
+    })
+
+    // Retrieve with trust context
+    resp, _ := m.Retrieve(ctx, &retrieval.RetrieveRequest{
+        TaskDescriptor: "fix build error",
+        Trust: &retrieval.TrustContext{
+            MaxSensitivity: schema.SensitivityMedium,
+            Authenticated:  true,
+        },
+        MemoryTypes: []schema.MemoryType{
+            schema.MemoryTypeCompetence,
+            schema.MemoryTypeSemantic,
+        },
+    })
+
+    for _, r := range resp.Records {
+        fmt.Printf("Found: %s (type=%s, confidence=%.2f)\n", r.ID, r.Type, r.Confidence)
+    }
+}
+```
+
+Run your program:
+
+```bash
+go run main.go
+```
+
+### Understanding the Memory Types
+
+Membrane organizes memory into five distinct types, each with its own purpose:
 
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Episodic" icon="clock">
+    **Immutable raw experience**
+    
+    Tool calls, errors, observations from a debugging session. These records never change once created.
+  </Card>
+  
+  <Card title="Working" icon="list-check">
+    **Current task state**
+    
+    Tracks in-flight tasks: "Backend initialized, frontend pending, docs TODO"
+  </Card>
+  
+  <Card title="Semantic" icon="book">
+    **Stable facts and preferences**
+    
+    Consolidated knowledge: "User prefers Go for backend services"
+  </Card>
+  
+  <Card title="Competence" icon="graduation-cap">
+    **Learned procedures**
+    
+    How-to knowledge with success tracking: "To fix linker cache error: clear cache, rebuild with flags"
+  </Card>
+  
+  <Card title="Plan Graph" icon="diagram-project">
+    **Reusable solution structures**
+    
+    Multi-step workflows with dependencies and checkpoints
+  </Card>
 </CardGroup>
 
+## Using Client SDKs
+
+If you prefer to use Membrane as a standalone daemon with client SDKs:
+
+<CodeGroup>
+
+```typescript TypeScript
+import { MembraneClient, Sensitivity } from "@gustycube/membrane";
+
+const client = new MembraneClient("localhost:9090", { apiKey: "your-key" });
+
+// Ingest an event
+const record = await client.ingestEvent("tool_call", "task#1", {
+  summary: "Ran database migration successfully",
+  tags: ["db", "migration"]
+});
+
+// Retrieve with trust context
+const results = await client.retrieve("database operations", {
+  trust: {
+    max_sensitivity: Sensitivity.MEDIUM,
+    authenticated: true,
+    actor_id: "ts-agent",
+    scopes: []
+  },
+  memoryTypes: ["semantic", "competence"]
+});
+
+client.close();
+```
+
+```python Python
+from membrane import MembraneClient, Sensitivity, TrustContext
+
+client = MembraneClient("localhost:9090", api_key="your-key")
+
+# Ingest an event
+record = client.ingest_event(
+    source="my-agent",
+    event_kind="tool_call",
+    ref="task#1",
+    summary="Ran database migration successfully",
+    tags=["db", "migration"],
+)
+
+# Retrieve with trust context
+results = client.retrieve(
+    task_descriptor="database operations",
+    trust=TrustContext(max_sensitivity=Sensitivity.MEDIUM, authenticated=True),
+    memory_types=["semantic", "competence"],
+)
+```
+
+</CodeGroup>
+
+### Installing Client SDKs
+
+<CodeGroup>
+
+```bash npm
+npm install @gustycube/membrane
+```
+
+```bash pip
+pip install -e clients/python
+```
+
+</CodeGroup>
+
+## Key Operations
+
+### Ingestion
+
+Membrane provides specialized ingestion methods for each memory type:
+
+```go
+// Episodic events (tool calls, observations)
+m.IngestEvent(ctx, ingestion.IngestEventRequest{...})
+m.IngestToolOutput(ctx, ingestion.IngestToolOutputRequest{...})
+
+// Semantic observations
+m.IngestObservation(ctx, ingestion.IngestObservationRequest{...})
+
+// Working memory state
+m.IngestWorkingState(ctx, ingestion.IngestWorkingStateRequest{...})
+
+// Update outcomes
+m.IngestOutcome(ctx, ingestion.IngestOutcomeRequest{...})
+```
+
+### Retrieval
+
+Retrieve memory with trust-aware filtering:
+
+```go
+resp, err := m.Retrieve(ctx, &retrieval.RetrieveRequest{
+    TaskDescriptor: "plan database migration",
+    Trust: &retrieval.TrustContext{
+        MaxSensitivity: schema.SensitivityMedium,
+        Authenticated:  true,
+    },
+    MemoryTypes: []schema.MemoryType{
+        schema.MemoryTypeCompetence,
+        schema.MemoryTypeSemantic,
+    },
+    Limit: 10,
+})
+```
+
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  Records with sensitivity levels above the caller's threshold are automatically filtered or redacted.
 </Note>
+
+### Revision Operations
+
+Membrane supports five revision operations with full audit trails:
+
+```go
+// Supersede a record with a new version
+superseded, _ := m.Supersede(ctx, oldRecordID, newRec, "agent", "Go version updated")
+
+// Fork a record for conditional validity
+forked, _ := m.Fork(ctx, sourceID, conditionalRec, "agent", "different for dev environment")
+
+// Contest a record when conflicting evidence appears
+m.Contest(ctx, recordID, conflictingRecordID, "agent", "new evidence contradicts this")
+
+// Retract a record that is no longer valid
+m.Retract(ctx, recordID, "agent", "no longer accurate")
+
+// Merge multiple records into one
+merged, _ := m.Merge(ctx, []string{id1, id2, id3}, mergedRec, "agent", "consolidating duplicates")
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card
+    title="Installation Guide"
+    icon="download"
+    href="/installation"
+  >
+    Learn about Postgres setup, Docker deployment, and advanced configuration
+  </Card>
+  
+  <Card
+    title="Memory Types"
+    icon="shapes"
+    href="/concepts/memory-types"
+  >
+    Deep dive into schemas, lifecycle rules, and consolidation behavior
+  </Card>
+  
+  <Card
+    title="LLM Integration"
+    icon="brain"
+    href="/guides/llm-integration"
+  >
+    Learn how to integrate Membrane with your LLM orchestration layer
+  </Card>
+  
+  <Card
+    title="API Reference"
+    icon="code"
+    href="/api/overview"
+  >
+    Explore the complete gRPC API and Go library reference
+  </Card>
+</CardGroup>
+
+## Running Tests
+
+Verify your installation:
+
+```bash
+# Run all tests
+make test
+
+# Run specific evaluation suites
+make eval-typed          # Memory type handling
+make eval-revision       # Revision semantics
+make eval-trust          # Trust-gated retrieval
+make eval-competence     # Competence learning
+
+# Run all evaluations
+make eval-all
+```
+
+<Warning>
+  The default SQLite backend is optimized for single-writer scenarios. For concurrent access, use the [Postgres backend](/installation#postgres-backend).
+</Warning>

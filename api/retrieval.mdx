@@ -1,0 +1,373 @@
+---
+title: Retrieval API
+description: Query memory with trust-aware filtering, layered ordering, and multi-solution selection
+---
+
+## Overview
+
+The retrieval API implements layered memory retrieval with trust-gated access control. Records are filtered by sensitivity level, scoped access, and salience threshold before being ranked and returned.
+
+<Card title="Trust-Aware Access" icon="shield">
+  All retrieval operations require a `TrustContext` that defines the caller's maximum sensitivity level, authentication status, and allowed scopes.
+</Card>
+
+## Layered Retrieval Order
+
+Records are queried in this canonical order per RFC 15.8:
+
+1. **Working** — Current task state
+2. **Semantic** — Stable facts and preferences
+3. **Competence** — Learned procedures
+4. **Plan Graph** — Reusable solution structures
+5. **Episodic** — Raw experience capture
+
+Competence and plan graph candidates are evaluated through the multi-solution selector for applicability scoring.
+
+---
+
+## Retrieve
+
+Perform layered retrieval with trust context, memory type filters, and salience threshold.
+
+<CodeGroup>
+```typescript TypeScript
+const results = await client.retrieve({
+  task_descriptor: "fix database migration error",
+  trust: {
+    max_sensitivity: Sensitivity.MEDIUM,
+    authenticated: true,
+    actor_id: "repair-agent",
+    scopes: ["project-acme"]
+  },
+  memory_types: ["semantic", "competence"],
+  min_salience: 0.3,
+  limit: 10
+});
+
+for (const record of results.records) {
+  console.log(`${record.id}: ${record.type} (salience: ${record.salience})`);
+}
+```
+
+```python Python
+results = client.retrieve(
+    task_descriptor="fix database migration error",
+    trust=TrustContext(
+        max_sensitivity=Sensitivity.MEDIUM,
+        authenticated=True,
+        actor_id="repair-agent",
+        scopes=["project-acme"]
+    ),
+    memory_types=["semantic", "competence"],
+    min_salience=0.3,
+    limit=10
+)
+
+for record in results.records:
+    print(f"{record.id}: {record.type} (salience: {record.salience})")
+```
+
+```go Go
+resp, err := client.Retrieve(ctx, &membranev1.RetrieveRequest{
+    TaskDescriptor: "fix database migration error",
+    Trust: &membranev1.TrustContext{
+        MaxSensitivity: "medium",
+        Authenticated:  true,
+        ActorId:        "repair-agent",
+        Scopes:         []string{"project-acme"},
+    },
+    MemoryTypes: []string{"semantic", "competence"},
+    MinSalience: 0.3,
+    Limit:       10,
+})
+```
+</CodeGroup>
+
+### Request Parameters
+
+<ParamField path="task_descriptor" type="string" required>
+  Description of the current task for contextual retrieval and competence/plan_graph applicability scoring
+</ParamField>
+
+<ParamField path="trust" type="TrustContext" required>
+  Trust context that gates record access
+</ParamField>
+
+<ParamField path="memory_types" type="string[]">
+  Restrict retrieval to specific memory types. If empty, queries all types in layered order: `["working", "semantic", "competence", "plan_graph", "episodic"]`
+</ParamField>
+
+<ParamField path="min_salience" type="number" default="0">
+  Filter out records below this salience threshold (range: [0, 1])
+</ParamField>
+
+<ParamField path="limit" type="number" default="0">
+  Maximum number of records to return. 0 means no limit
+</ParamField>
+
+### TrustContext Fields
+
+<ParamField path="trust.max_sensitivity" type="string" required>
+  Maximum sensitivity level the caller can access: `public`, `low`, `medium`, `high`, or `hyper`
+</ParamField>
+
+<ParamField path="trust.authenticated" type="boolean" required>
+  Whether the requester has been authenticated
+</ParamField>
+
+<ParamField path="trust.actor_id" type="string">
+  Identifier of the actor making the request
+</ParamField>
+
+<ParamField path="trust.scopes" type="string[]">
+  Scopes the requester is allowed to access. Empty means all scopes allowed. Records with matching scope or empty scope are returned
+</ParamField>
+
+### Response
+
+<ResponseField name="records" type="MemoryRecord[]">
+  Filtered, sorted, and limited memory records. Records are ordered by salience descending, with selected competence/plan_graph records prioritized when applicable
+</ResponseField>
+
+<ResponseField name="selection" type="SelectionResult">
+  Non-null when competence or plan_graph candidates were evaluated through the multi-solution selector. Contains selected records and applicability scores
+</ResponseField>
+
+### Trust Filtering Behavior
+
+<Expandable title="Sensitivity Levels">
+  Records are filtered by sensitivity level:
+
+  - **Exact match or below**: Records with sensitivity ≤ `max_sensitivity` are returned with full payload
+  - **One level above**: Records exactly one level above `max_sensitivity` are returned in **redacted form** (metadata only, no payload)
+  - **Two or more levels above**: Records are completely filtered out
+
+  Example: If `max_sensitivity = "medium"`:
+  - `public`, `low`, `medium` → full access
+  - `high` → redacted (metadata only)
+  - `hyper` → filtered out
+</Expandable>
+
+<Expandable title="Scope Filtering">
+  Records are filtered by scope:
+
+  - If `trust.scopes` is empty, all records are allowed regardless of their scope
+  - If `trust.scopes` is non-empty:
+    - Records with `scope` in `trust.scopes` are allowed
+    - Records with empty `scope` are allowed (unscoped records are global)
+    - Records with `scope` not in `trust.scopes` are filtered out
+</Expandable>
+
+---
+
+## RetrieveByID
+
+Fetch a single memory record by ID with trust context validation.
+
+<CodeGroup>
+```typescript TypeScript
+const record = await client.retrieveByID("record-uuid", {
+  max_sensitivity: Sensitivity.HIGH,
+  authenticated: true,
+  actor_id: "admin-agent",
+  scopes: []
+});
+
+console.log(`Retrieved: ${record.type} record`);
+```
+
+```python Python
+record = client.retrieve_by_id(
+    "record-uuid",
+    TrustContext(
+        max_sensitivity=Sensitivity.HIGH,
+        authenticated=True,
+        actor_id="admin-agent",
+        scopes=[]
+    )
+)
+
+print(f"Retrieved: {record.type} record")
+```
+
+```go Go
+resp, err := client.RetrieveByID(ctx, &membranev1.RetrieveByIDRequest{
+    Id: "record-uuid",
+    Trust: &membranev1.TrustContext{
+        MaxSensitivity: "high",
+        Authenticated:  true,
+        ActorId:        "admin-agent",
+        Scopes:         []string{},
+    },
+})
+if err != nil {
+    log.Fatal(err)
+}
+```
+</CodeGroup>
+
+### Request Parameters
+
+<ParamField path="id" type="string" required>
+  UUID of the record to retrieve
+</ParamField>
+
+<ParamField path="trust" type="TrustContext" required>
+  Trust context that gates record access
+</ParamField>
+
+### Response
+
+<ResponseField name="record" type="MemoryRecord">
+  The requested memory record if it exists and trust context allows access
+</ResponseField>
+
+### Error Responses
+
+| Error | Code | Description |
+|-------|------|-------------|
+| NOT_FOUND | 5 | Record with the given ID does not exist |
+| PERMISSION_DENIED | 7 | Trust context denies access to this record |
+| INVALID_ARGUMENT | 3 | Trust context is nil or invalid |
+
+---
+
+## Example: Building LLM Context
+
+Retrieve memory and inject it into an LLM prompt:
+
+```typescript
+import OpenAI from "openai";
+import { MembraneClient, Sensitivity } from "@gustycube/membrane";
+
+const memory = new MembraneClient("localhost:9090", {
+  apiKey: process.env.MEMBRANE_API_KEY
+});
+const llm = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// Retrieve relevant memory
+const results = await memory.retrieve({
+  task_descriptor: "deploy backend service",
+  trust: {
+    max_sensitivity: Sensitivity.MEDIUM,
+    authenticated: true,
+    actor_id: "deploy-agent",
+    scopes: ["production"]
+  },
+  memory_types: ["semantic", "competence", "working"],
+  min_salience: 0.4,
+  limit: 15
+});
+
+// Build context from memory records
+const memoryContext = results.records
+  .map(r => {
+    if (r.type === "semantic") {
+      const p = r.payload as SemanticPayload;
+      return `${p.subject} ${p.predicate} ${JSON.stringify(p.object)}`;
+    } else if (r.type === "competence") {
+      const c = r.payload as CompetencePayload;
+      return `Skill: ${c.skill_name}\nSteps: ${c.recipe.map(s => s.step).join(", ")}`;
+    }
+    return JSON.stringify(r.payload);
+  })
+  .join("\n\n");
+
+// Generate response with memory context
+const completion = await llm.chat.completions.create({
+  model: "gpt-4",
+  messages: [
+    {
+      role: "system",
+      content: "Use memory context as evidence. Cite record IDs when referencing memory."
+    },
+    {
+      role: "user",
+      content: `Task: deploy backend service\n\nMemory Context:\n${memoryContext}`
+    }
+  ]
+});
+
+const plan = completion.choices[0]?.message?.content ?? "";
+console.log("Deployment plan:", plan);
+
+// Reinforce useful records
+for (const record of results.records) {
+  await memory.reinforce(record.id, "deploy-agent", "used in deployment planning");
+}
+```
+
+---
+
+## Example: Filtering by Memory Type
+
+Retrieve only competence records for a specific task:
+
+```python
+from membrane import MembraneClient, Sensitivity, TrustContext
+
+client = MembraneClient("localhost:9090", api_key=os.environ["MEMBRANE_API_KEY"])
+
+# Retrieve only competence records
+results = client.retrieve(
+    task_descriptor="fix TypeScript compiler error",
+    trust=TrustContext(
+        max_sensitivity=Sensitivity.MEDIUM,
+        authenticated=True,
+        actor_id="repair-bot",
+        scopes=["codebase-typescript"]
+    ),
+    memory_types=["competence"],
+    min_salience=0.5,
+    limit=5
+)
+
+for record in results.records:
+    competence = record.payload
+    print(f"Skill: {competence.skill_name}")
+    print(f"Success rate: {competence.performance.success_rate:.2%}")
+    print(f"Recipe steps: {len(competence.recipe)}")
+    print("---")
+```
+
+---
+
+## Multi-Solution Selection
+
+When competence or plan_graph records are retrieved, Membrane runs them through a multi-solution selector that scores applicability based on:
+
+- **Confidence**: Epistemic confidence in the record
+- **Salience**: Time-decayed importance
+- **Embedding similarity**: Cosine similarity between task descriptor and record embedding (when pgvector backend is enabled)
+- **Performance stats**: Success rate for competence records, failure rate for plan graphs
+
+The `selection` field in the response contains:
+
+<ResponseField name="selection.selected" type="MemoryRecord[]">
+  Competence/plan_graph records that passed the applicability threshold, sorted by applicability score descending
+</ResponseField>
+
+<ResponseField name="selection.candidates" type="number">
+  Total number of competence/plan_graph candidates evaluated
+</ResponseField>
+
+<ResponseField name="selection.threshold" type="number">
+  Applicability threshold used for selection (configurable via `selection_confidence_threshold` in config)
+</ResponseField>
+
+<Note>
+When `selection` is non-null, the `records` array is reordered to prioritize selected competence/plan_graph records before other memory types.
+</Note>
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Ingestion API" icon="download" href="/api/ingestion">
+    Ingest events, tool outputs, and observations
+  </Card>
+  <Card title="Revision API" icon="rotate" href="/api/revision">
+    Supersede, fork, retract, and merge records
+  </Card>
+</CardGroup>

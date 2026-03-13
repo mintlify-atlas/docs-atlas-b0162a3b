@@ -1,0 +1,455 @@
+---
+title: 'Schema'
+description: 'Core data structures for the memory substrate'
+---
+
+The `schema` package defines the core data structures for the Membrane memory substrate as specified in RFC 15A (Schema Appendix).
+
+## MemoryRecord
+
+The atomic unit of storage in the memory substrate. Every stored memory item conforms to this shape.
+
+```go
+type MemoryRecord struct {
+    ID          string        // Globally unique identifier (UUID recommended)
+    Type        MemoryType    // Memory type (episodic, working, semantic, competence, plan_graph)
+    Sensitivity Sensitivity   // Sensitivity classification (public, low, medium, high, hyper)
+    Confidence  float64       // Epistemic confidence [0, 1]
+    Salience    float64       // Decay-weighted importance score [0, +inf)
+    Scope       string        // Visibility scope (optional)
+    Tags        []string      // Free-form labels for categorization
+    CreatedAt   time.Time     // When this record was created
+    UpdatedAt   time.Time     // When this record was last updated
+    Lifecycle   Lifecycle     // Decay, reinforcement, deletion metadata
+    Provenance  Provenance    // Links to source events or artifacts
+    Relations   []Relation    // Graph edges to other MemoryRecords
+    Payload     Payload       // Type-specific structured content
+    AuditLog    []AuditEntry  // All actions performed on this record
+}
+```
+
+### Constructor
+
+```go
+func NewMemoryRecord(
+    id string,
+    memType MemoryType,
+    sensitivity Sensitivity,
+    payload Payload,
+) *MemoryRecord
+```
+
+Creates a new MemoryRecord with required fields initialized and sensible defaults.
+
+### Validation
+
+```go
+func (mr *MemoryRecord) Validate() error
+```
+
+Performs basic validation. Returns error if required fields are missing or invalid.
+
+## Memory Types
+
+```go
+type MemoryType string
+
+const (
+    MemoryTypeEpisodic   MemoryType = "episodic"    // Raw experience (events, tool calls)
+    MemoryTypeWorking    MemoryType = "working"     // Current task state
+    MemoryTypeSemantic   MemoryType = "semantic"    // Stable knowledge (facts, preferences)
+    MemoryTypeCompetence MemoryType = "competence"  // Procedural knowledge (how-to)
+    MemoryTypePlanGraph  MemoryType = "plan_graph"  // Reusable solution structures
+)
+
+func IsValidMemoryType(mt MemoryType) bool
+```
+
+<Card title="Episodic" icon="clock">
+Captures raw experience such as user inputs, tool calls, errors, and observations. Episodic memory is intentionally short-lived and provides evidence for later learning.
+</Card>
+
+<Card title="Working" icon="list-check">
+Captures the current state of an ongoing task, enabling resumption across sessions or devices.
+</Card>
+
+<Card title="Semantic" icon="book">
+Stores stable knowledge such as preferences, environment facts, and relationships. Supports revisability.
+</Card>
+
+<Card title="Competence" icon="wand-magic-sparkles">
+Encodes procedural knowledge: how to achieve goals reliably under specific conditions.
+</Card>
+
+<Card title="Plan Graph" icon="diagram-project">
+Stores reusable solution structures as directed graphs of actions.
+</Card>
+
+## Sensitivity Levels
+
+```go
+type Sensitivity string
+
+const (
+    SensitivityPublic Sensitivity = "public"  // Content that can be freely shared
+    SensitivityLow    Sensitivity = "low"     // Minimal sensitivity
+    SensitivityMedium Sensitivity = "medium"  // Moderately sensitive content
+    SensitivityHigh   Sensitivity = "high"    // Highly sensitive, elevated trust required
+    SensitivityHyper  Sensitivity = "hyper"   // Extremely sensitive, maximum protection
+)
+
+func IsValidSensitivity(s Sensitivity) bool
+```
+
+Higher sensitivity levels require stricter trust context for retrieval.
+
+## Payload Types
+
+All payloads implement the `Payload` interface:
+
+```go
+type Payload interface {
+    PayloadKind() string
+    isPayload()
+}
+```
+
+### EpisodicPayload
+
+Captures raw experience as a time-ordered sequence of events.
+
+```go
+type EpisodicPayload struct {
+    Kind         string              // "episodic"
+    Timeline     []TimelineEvent     // Time-ordered sequence of events
+    ToolGraph    []ToolNode          // Tool calls and data flow (optional)
+    Environment  *EnvironmentSnapshot // Environment snapshot (optional)
+    Outcome      OutcomeStatus       // Result of the episode (optional)
+    Artifacts    []string            // External artifacts (logs, files) (optional)
+    ToolGraphRef string              // External tool graph reference (optional)
+}
+
+type TimelineEvent struct {
+    T         time.Time  // Timestamp of the event
+    EventKind string     // Event type
+    Ref       string     // Reference to event details
+    Summary   string     // Human-readable summary (optional)
+}
+
+type ToolNode struct {
+    ID        string         // Unique identifier for this tool node
+    Tool      string         // Name or identifier of the tool
+    Args      map[string]any // Arguments passed to the tool
+    Result    any            // Output from the tool
+    Timestamp time.Time      // When the tool was invoked
+    DependsOn []string       // IDs of tool nodes this depends on
+}
+```
+
+### WorkingPayload
+
+Captures the current state of an ongoing task.
+
+```go
+type WorkingPayload struct {
+    Kind              string        // "working"
+    ThreadID          string        // Identifier for current thread/session
+    State             TaskState     // Current task state
+    ActiveConstraints []Constraint  // Currently active constraints
+    NextActions       []string      // Next planned actions (optional)
+    OpenQuestions     []string      // Unresolved questions (optional)
+    ContextSummary    string        // Summary of current context (optional)
+}
+
+type Constraint struct {
+    Type     string // Constraint type
+    Key      string // Constraint key or name
+    Value    any    // Constraint value
+    Required bool   // Whether constraint is mandatory (optional)
+}
+```
+
+### SemanticPayload
+
+Stores revisable facts as subject-predicate-object triples.
+
+```go
+type SemanticPayload struct {
+    Kind           string          // "semantic"
+    Subject        string          // Entity the fact is about
+    Predicate      string          // Relationship or property
+    Object         any             // Value or related entity
+    Validity       Validity        // When this fact is valid
+    Evidence       []ProvenanceRef // Provenance supporting this fact (optional)
+    RevisionPolicy string          // How to revise: "replace", "fork", "contest" (optional)
+    Revision       *RevisionState  // Revision tracking (optional)
+}
+
+type Validity struct {
+    Mode       ValidityMode   // "global", "conditional", "timeboxed"
+    Conditions map[string]any // Conditional keys (optional)
+    Start      *time.Time     // Validity window start (optional)
+    End        *time.Time     // Validity window end (optional)
+}
+
+type RevisionState struct {
+    Supersedes   string         // ID of the record this supersedes (optional)
+    SupersededBy string         // ID of the record that supersedes this (optional)
+    Status       RevisionStatus // "active", "contested", "retracted" (optional)
+}
+```
+
+### CompetencePayload
+
+Encodes procedural knowledge: how to achieve goals.
+
+```go
+type CompetencePayload struct {
+    Kind          string            // "competence"
+    SkillName     string            // Name of the skill or procedure
+    Triggers      []Trigger         // When this competence applies
+    Recipe        []RecipeStep      // Ordered or conditional steps
+    RequiredTools []string          // Tools needed (optional)
+    FailureModes  []string          // Known failure cases (optional)
+    Fallbacks     []string          // Alternative steps when primary fails (optional)
+    Performance   *PerformanceStats // Success/failure statistics (optional)
+    Version       string            // Version identifier (optional)
+}
+
+type Trigger struct {
+    Signal     string         // Trigger signal (e.g., error signature, intent)
+    Conditions map[string]any // Additional matching conditions (optional)
+}
+
+type RecipeStep struct {
+    Step       string         // Human-readable step description
+    Tool       string         // Tool to use for this step (optional)
+    ArgsSchema map[string]any // Expected arguments for the tool (optional)
+    Validation string         // How to verify step success (optional)
+}
+
+type PerformanceStats struct {
+    SuccessCount int64      // Number of successful uses
+    FailureCount int64      // Number of failed uses
+    SuccessRate  float64    // Computed success rate [0, 1]
+    AvgLatencyMs float64    // Average execution time in milliseconds
+    LastUsedAt   *time.Time // When this was last used (optional)
+}
+```
+
+### PlanGraphPayload
+
+Stores reusable solution structures as directed graphs.
+
+```go
+type PlanGraphPayload struct {
+    Kind          string         // "plan_graph"
+    PlanID        string         // Unique identifier for this plan
+    Version       string         // Version identifier
+    Intent        string         // High-level intent label (optional)
+    Constraints   map[string]any // Trust requirements, sensitivity limits (optional)
+    InputsSchema  map[string]any // Expected inputs schema (optional)
+    OutputsSchema map[string]any // Expected outputs schema (optional)
+    Nodes         []PlanNode     // Action nodes in the plan graph
+    Edges         []PlanEdge     // Dependency edges in the plan graph
+    Metrics       *PlanMetrics   // Plan execution statistics (optional)
+}
+
+type PlanNode struct {
+    ID     string         // Unique identifier within the plan
+    Op     string         // Action or tool identifier
+    Params map[string]any // Parameters for the operation (optional)
+    Guards map[string]any // Conditional execution criteria (optional)
+}
+
+type PlanEdge struct {
+    From string   // Source node ID
+    To   string   // Target node ID
+    Kind EdgeKind // "data" or "control"
+}
+
+type PlanMetrics struct {
+    AvgLatencyMs   float64    // Average execution time in milliseconds
+    FailureRate    float64    // Rate of failed executions [0, 1]
+    ExecutionCount int64      // Total number of executions
+    LastExecutedAt *time.Time // When this plan was last executed (optional)
+}
+```
+
+## Lifecycle
+
+```go
+type Lifecycle struct {
+    Decay            DecayProfile
+    LastReinforcedAt time.Time
+    Pinned           bool
+    DeletionPolicy   DeletionPolicy
+}
+
+type DecayProfile struct {
+    Curve            DecayCurve // "exponential"
+    HalfLifeSeconds  int64      // Half-life for exponential decay
+    MinSalience      float64    // Minimum salience threshold
+    MaxAgeSeconds    int64      // Maximum age before deletion (optional)
+    ReinforcementGain float64   // Salience boost on reinforcement
+}
+```
+
+## Enums
+
+### TaskState
+
+```go
+type TaskState string
+
+const (
+    TaskStatePlanning  TaskState = "planning"   // Task is in planning phase
+    TaskStateExecuting TaskState = "executing"  // Task is actively being executed
+    TaskStateBlocked   TaskState = "blocked"    // Task cannot proceed due to blocker
+    TaskStateWaiting   TaskState = "waiting"    // Task is waiting for external input
+    TaskStateDone      TaskState = "done"       // Task has completed
+)
+```
+
+### OutcomeStatus
+
+```go
+type OutcomeStatus string
+
+const (
+    OutcomeStatusSuccess OutcomeStatus = "success" // Experience completed successfully
+    OutcomeStatusFailure OutcomeStatus = "failure" // Experience ended in failure
+    OutcomeStatusPartial OutcomeStatus = "partial" // Partial success or incomplete
+)
+```
+
+### DecayCurve
+
+```go
+type DecayCurve string
+
+const (
+    DecayCurveExponential DecayCurve = "exponential"
+)
+```
+
+### DeletionPolicy
+
+```go
+type DeletionPolicy string
+
+const (
+    DeletionPolicyAutoPrune  DeletionPolicy = "auto_prune"   // Allow automatic deletion
+    DeletionPolicyManualOnly DeletionPolicy = "manual_only"  // Require explicit user action
+    DeletionPolicyNever      DeletionPolicy = "never"        // Prevent deletion entirely
+)
+```
+
+### ValidityMode
+
+```go
+type ValidityMode string
+
+const (
+    ValidityModeGlobal      ValidityMode = "global"      // Universally valid
+    ValidityModeConditional ValidityMode = "conditional" // Valid under specific conditions
+    ValidityModeTimeboxed   ValidityMode = "timeboxed"   // Valid within a time window
+)
+```
+
+### RevisionStatus
+
+```go
+type RevisionStatus string
+
+const (
+    RevisionStatusActive    RevisionStatus = "active"    // Currently valid
+    RevisionStatusContested RevisionStatus = "contested" // Uncertainty until resolved
+    RevisionStatusRetracted RevisionStatus = "retracted" // Withdrawn
+)
+```
+
+### AuditAction
+
+```go
+type AuditAction string
+
+const (
+    AuditActionCreate    AuditAction = "create"     // New record created
+    AuditActionRevise    AuditAction = "revise"     // Existing record revised
+    AuditActionFork      AuditAction = "fork"       // Record forked into conditional variants
+    AuditActionMerge     AuditAction = "merge"      // Records merged together
+    AuditActionDelete    AuditAction = "delete"     // Record deleted
+    AuditActionReinforce AuditAction = "reinforce"  // Salience reinforced
+    AuditActionDecay     AuditAction = "decay"      // Salience decayed
+)
+```
+
+### ProvenanceKind
+
+```go
+type ProvenanceKind string
+
+const (
+    ProvenanceKindEvent       ProvenanceKind = "event"       // Source is an event
+    ProvenanceKindArtifact    ProvenanceKind = "artifact"    // Source is artifact (log, file)
+    ProvenanceKindToolCall    ProvenanceKind = "tool_call"   // Source is tool invocation
+    ProvenanceKindObservation ProvenanceKind = "observation" // Source is observation
+    ProvenanceKindOutcome     ProvenanceKind = "outcome"     // Source is task outcome
+)
+```
+
+### EdgeKind
+
+```go
+type EdgeKind string
+
+const (
+    EdgeKindData    EdgeKind = "data"    // Data dependency edge
+    EdgeKindControl EdgeKind = "control" // Control flow edge
+)
+```
+
+## Example
+
+```go
+package main
+
+import (
+    "time"
+    "github.com/google/uuid"
+    "github.com/GustyCube/membrane/pkg/schema"
+)
+
+func main() {
+    // Create a semantic memory record
+    payload := &schema.SemanticPayload{
+        Kind:      "semantic",
+        Subject:   "user-preferences",
+        Predicate: "editor",
+        Object:    "vim",
+        Validity: schema.Validity{
+            Mode: schema.ValidityModeGlobal,
+        },
+        Evidence: []schema.ProvenanceRef{
+            {
+                SourceType: "observation",
+                SourceID:   "obs-123",
+                Timestamp:  time.Now(),
+            },
+        },
+        RevisionPolicy: "replace",
+    }
+
+    rec := schema.NewMemoryRecord(
+        uuid.New().String(),
+        schema.MemoryTypeSemantic,
+        schema.SensitivityLow,
+        payload,
+    )
+
+    if err := rec.Validate(); err != nil {
+        panic(err)
+    }
+}
+```

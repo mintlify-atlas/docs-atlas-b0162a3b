@@ -1,0 +1,536 @@
+---
+title: Python Client
+description: Python client library for the Membrane memory substrate
+---
+
+The Python client provides a Pythonic interface for communicating with the Membrane daemon over gRPC using the protobuf-defined service contract.
+
+## Installation
+
+Install from the project root:
+
+```bash
+pip install -e clients/python
+```
+
+Or with development dependencies:
+
+```bash
+pip install -e clients/python[dev]
+```
+
+**Requirements:**
+- Python >= 3.10
+- `grpcio >= 1.78.0`
+- `protobuf >= 6.31.1`
+- A running Membrane daemon (default: `localhost:9090`)
+
+## Quick Start
+
+```python
+from membrane import MembraneClient, Sensitivity, TrustContext
+
+# Connect to the running Membrane daemon
+client = MembraneClient("localhost:9090")
+
+# Ingest an event
+record = client.ingest_event(
+    event_kind="file_edit",
+    ref="src/main.py",
+    summary="Refactored authentication module",
+    sensitivity=Sensitivity.LOW,
+)
+print(f"Created record: {record.id}")
+
+# Retrieve memories relevant to a task
+trust = TrustContext(
+    max_sensitivity=Sensitivity.MEDIUM,
+    authenticated=True,
+    actor_id="agent-1",
+)
+records = client.retrieve("fix the login bug", trust=trust, limit=5)
+for r in records:
+    print(f"  [{r.type.value}] {r.id} (salience={r.salience:.2f})")
+
+# Reinforce a useful memory
+client.reinforce(record.id, actor="agent-1", rationale="Used successfully")
+
+# Clean up
+client.close()
+```
+
+### Context Manager
+
+The client supports context manager protocol for automatic cleanup:
+
+```python
+with MembraneClient("localhost:9090") as client:
+    record = client.ingest_observation(
+        subject="user",
+        predicate="prefers",
+        obj={"language": "Python"},
+        sensitivity=Sensitivity.LOW,
+    )
+```
+
+## API Reference
+
+### Constructor
+
+<ParamField path="address" type="str" required>
+  The Membrane daemon address (e.g., `localhost:9090`)
+</ParamField>
+
+<ParamField path="tls" type="bool" default="False">
+  Enable TLS transport encryption
+</ParamField>
+
+<ParamField path="tls_ca_cert" type="str">
+  Path to custom CA certificate for TLS
+</ParamField>
+
+<ParamField path="api_key" type="str">
+  Bearer token for authentication
+</ParamField>
+
+<ParamField path="timeout" type="float" default="varies">
+  Default timeout in seconds for RPC calls
+</ParamField>
+
+### Ingestion Methods
+
+<Tabs>
+  <Tab title="ingest_event">
+    ```python
+    client.ingest_event(
+        event_kind: str,
+        ref: str,
+        summary: str = "",
+        sensitivity: Sensitivity = Sensitivity.LOW,
+        source: str = "",
+        tags: list[str] | None = None,
+    ) -> MemoryRecord
+    ```
+    
+    Ingest a raw event into episodic memory.
+    
+    **Parameters:**
+    - `event_kind`: Type of event (e.g., `"file_edit"`, `"user_action"`)
+    - `ref`: Unique reference identifier
+    - `summary`: Human-readable event description
+    - `sensitivity`: Access control level (default: `Sensitivity.LOW`)
+    - `source`: Origin identifier
+    - `tags`: Searchable tags
+    
+    **Returns:** The created `MemoryRecord`
+  </Tab>
+  
+  <Tab title="ingest_tool_output">
+    ```python
+    client.ingest_tool_output(
+        tool_name: str,
+        args: dict[str, Any] | None = None,
+        result: Any = None,
+        sensitivity: Sensitivity = Sensitivity.LOW,
+        source: str = "",
+        tags: list[str] | None = None,
+    ) -> MemoryRecord
+    ```
+    
+    Ingest tool invocation results into competence memory.
+    
+    **Parameters:**
+    - `tool_name`: Name of the invoked tool
+    - `args`: Tool input parameters
+    - `result`: Tool output/result
+    - `sensitivity`: Access control level
+    - `source`: Origin identifier
+    - `tags`: Searchable tags
+  </Tab>
+  
+  <Tab title="ingest_observation">
+    ```python
+    client.ingest_observation(
+        subject: str,
+        predicate: str,
+        obj: Any,
+        sensitivity: Sensitivity = Sensitivity.LOW,
+        source: str = "",
+        tags: list[str] | None = None,
+    ) -> MemoryRecord
+    ```
+    
+    Ingest a semantic triple (subject-predicate-object) into semantic memory.
+    
+    **Parameters:**
+    - `subject`: The subject entity
+    - `predicate`: The relationship or property
+    - `obj`: The object value (can be dict, list, str, etc.)
+    - `sensitivity`: Access control level
+    - `source`: Origin identifier
+    - `tags`: Searchable tags
+  </Tab>
+  
+  <Tab title="ingest_outcome">
+    ```python
+    client.ingest_outcome(
+        target_record_id: str,
+        outcome_status: OutcomeStatus,
+        evidence: Any = None,
+        actor: str = "",
+        rationale: str = "",
+    ) -> MemoryRecord
+    ```
+    
+    Attach an outcome assessment to an existing memory record.
+    
+    **Parameters:**
+    - `target_record_id`: ID of the record to attach outcome to
+    - `outcome_status`: `OutcomeStatus.SUCCESS`, `FAILURE`, or `PARTIAL`
+    - `evidence`: Supporting evidence for the outcome
+    - `actor`: Who performed the assessment
+    - `rationale`: Explanation of the outcome
+  </Tab>
+  
+  <Tab title="ingest_working_state">
+    ```python
+    client.ingest_working_state(
+        thread_id: str,
+        state: Any,
+        sensitivity: Sensitivity = Sensitivity.LOW,
+        source: str = "",
+        tags: list[str] | None = None,
+    ) -> MemoryRecord
+    ```
+    
+    Ingest a working memory snapshot for multi-turn tasks.
+    
+    **Parameters:**
+    - `thread_id`: Unique identifier for the conversation thread
+    - `state`: The working memory state (dict, list, or any JSON-serializable object)
+    - `sensitivity`: Access control level
+    - `source`: Origin identifier
+    - `tags`: Searchable tags
+  </Tab>
+</Tabs>
+
+### Retrieval Methods
+
+<Tabs>
+  <Tab title="retrieve">
+    ```python
+    client.retrieve(
+        task_descriptor: str,
+        trust: TrustContext | None = None,
+        limit: int = 10,
+        memory_types: list[str] | None = None,
+        min_salience: float = 0.0,
+    ) -> list[MemoryRecord]
+    ```
+    
+    Retrieve memories relevant to a task. Returns only records (backward-compatible).
+    
+    **Parameters:**
+    - `task_descriptor`: Natural language description of the task
+    - `trust`: Trust context for access control
+    - `limit`: Maximum number of records to return
+    - `memory_types`: Filter by memory types (`["episodic", "semantic", ...]`)
+    - `min_salience`: Minimum salience threshold (0.0-1.0)
+    
+    **Returns:** List of `MemoryRecord` objects
+  </Tab>
+  
+  <Tab title="retrieve_with_selection">
+    ```python
+    client.retrieve_with_selection(
+        task_descriptor: str,
+        trust: TrustContext | None = None,
+        limit: int = 10,
+        memory_types: list[str] | None = None,
+        min_salience: float = 0.0,
+    ) -> tuple[list[MemoryRecord], SelectionResult | None]
+    ```
+    
+    Retrieve memories plus optional selector metadata.
+    
+    **Returns:** Tuple of `(records, selection)` where `selection` contains:
+    - `selected`: Records selected by the selector
+    - `confidence`: Selector confidence score
+    - `needs_more`: Whether more context is needed
+  </Tab>
+  
+  <Tab title="retrieve_by_id">
+    ```python
+    client.retrieve_by_id(
+        record_id: str,
+        trust: TrustContext | None = None,
+    ) -> MemoryRecord
+    ```
+    
+    Retrieve a single memory record by ID.
+    
+    **Parameters:**
+    - `record_id`: The unique record identifier
+    - `trust`: Trust context for access control
+    
+    **Returns:** The `MemoryRecord` object
+  </Tab>
+</Tabs>
+
+### Revision Methods
+
+Update, fork, or retract existing memories.
+
+<CodeGroup>
+```python supersede
+client.supersede(
+    old_id: str,
+    new_record: dict[str, Any],
+    actor: str,
+    rationale: str,
+) -> MemoryRecord
+```
+
+```python fork
+client.fork(
+    source_id: str,
+    forked_record: dict[str, Any],
+    actor: str,
+    rationale: str,
+) -> MemoryRecord
+```
+
+```python retract
+client.retract(
+    record_id: str,
+    actor: str,
+    rationale: str,
+) -> None
+```
+
+```python merge
+client.merge(
+    record_ids: list[str],
+    merged_record: dict[str, Any],
+    actor: str,
+    rationale: str,
+) -> MemoryRecord
+```
+
+```python contest
+client.contest(
+    record_id: str,
+    contesting_ref: str,
+    actor: str,
+    rationale: str,
+) -> None
+```
+</CodeGroup>
+
+### Reinforcement Methods
+
+Adjust memory salience based on utility feedback.
+
+<CodeGroup>
+```python reinforce
+client.reinforce(
+    record_id: str,
+    actor: str,
+    rationale: str,
+) -> None
+```
+
+```python penalize
+client.penalize(
+    record_id: str,
+    amount: float,
+    actor: str,
+    rationale: str,
+) -> None
+```
+</CodeGroup>
+
+### Metrics
+
+```python
+metrics = client.get_metrics()
+```
+
+Get a snapshot of daemon metrics (record counts, memory usage, etc.).
+
+## Types and Enums
+
+### Sensitivity Levels
+
+```python
+class Sensitivity(str, Enum):
+    PUBLIC = "public"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    HYPER = "hyper"
+```
+
+### Memory Types
+
+```python
+class MemoryType(str, Enum):
+    EPISODIC = "episodic"
+    WORKING = "working"
+    SEMANTIC = "semantic"
+    COMPETENCE = "competence"
+    PLAN_GRAPH = "plan_graph"
+```
+
+### TrustContext
+
+```python
+@dataclass
+class TrustContext:
+    max_sensitivity: Sensitivity = Sensitivity.LOW
+    authenticated: bool = False
+    actor_id: str = ""
+    scopes: list[str] = field(default_factory=list)
+```
+
+### MemoryRecord
+
+```python
+@dataclass
+class MemoryRecord:
+    id: str
+    type: MemoryType
+    sensitivity: Sensitivity
+    confidence: float
+    salience: float
+    scope: str = ""
+    tags: list[str] = field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""
+    lifecycle: Optional[Lifecycle] = None
+    provenance: Optional[Provenance] = None
+    relations: list[Relation] = field(default_factory=list)
+    payload: Any = field(default_factory=dict)
+    audit_log: list[AuditEntry] = field(default_factory=list)
+```
+
+## TLS & Authentication
+
+Connect to a TLS-secured Membrane instance:
+
+```python
+client = MembraneClient(
+    "membrane.example.com:443",
+    tls=True,                        # use TLS transport
+    tls_ca_cert="/path/to/ca.pem",   # optional custom CA
+    api_key="your-api-key",          # Bearer token auth
+    timeout=10.0,                    # default timeout in seconds
+)
+```
+
+<ParamField path="tls" type="bool">
+  Enable TLS transport encryption
+</ParamField>
+
+<ParamField path="tls_ca_cert" type="str">
+  Path to custom CA certificate (optional, uses system CA by default)
+</ParamField>
+
+<ParamField path="api_key" type="str">
+  Bearer token for authentication (passed as gRPC metadata)
+</ParamField>
+
+## Error Handling
+
+The client raises standard Python exceptions for gRPC errors:
+
+```python
+import grpc
+from membrane import MembraneClient, Sensitivity, TrustContext
+
+client = MembraneClient("localhost:9090")
+
+try:
+    records = client.retrieve(
+        "sensitive query",
+        trust=TrustContext(max_sensitivity=Sensitivity.LOW, authenticated=False)
+    )
+except grpc.RpcError as e:
+    if e.code() == grpc.StatusCode.PERMISSION_DENIED:
+        print(f"Access denied: {e.details()}")
+    elif e.code() == grpc.StatusCode.UNAVAILABLE:
+        print("Membrane daemon is not running")
+    else:
+        print(f"RPC failed: {e.code()} - {e.details()}")
+```
+
+**Common error codes:**
+- `UNAVAILABLE`: Daemon not running or unreachable
+- `UNAUTHENTICATED`: Invalid or missing API key
+- `PERMISSION_DENIED`: Insufficient trust context for requested sensitivity
+- `NOT_FOUND`: Record ID does not exist
+- `INVALID_ARGUMENT`: Malformed request parameters
+
+## LLM Integration Pattern
+
+Common workflow: ingest execution traces, retrieve relevant memories, pass context to your model.
+
+```python
+import os
+from openai import OpenAI
+from membrane import MembraneClient, Sensitivity, TrustContext
+
+# Initialize clients
+memory = MembraneClient("localhost:9090", api_key=os.getenv("MEMBRANE_API_KEY"))
+llm = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Retrieve relevant memories
+trust = TrustContext(
+    max_sensitivity=Sensitivity.MEDIUM,
+    authenticated=True,
+    actor_id="incident-agent",
+    scopes=["prod"],
+)
+
+records = memory.retrieve(
+    "how should I handle this incident?",
+    trust=trust,
+    memory_types=["semantic", "competence", "working"],
+    limit=10,
+)
+
+# Format memories for LLM context
+memory_context = "\n".join([f"[{r.type.value}] {r.id}: {r.payload}" for r in records])
+
+# Pass to LLM
+completion = llm.chat.completions.create(
+    model="gpt-4",
+    messages=[
+        {"role": "system", "content": "Use the memory context as evidence. Cite record IDs."},
+        {"role": "user", "content": f"Incident task:\n...\n\nMemory:\n{memory_context}"},
+    ],
+)
+
+print(completion.choices[0].message.content)
+memory.close()
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Context Managers" icon="code">
+    Always use `with MembraneClient(...) as client:` to ensure proper cleanup.
+  </Card>
+  
+  <Card title="Trust Contexts" icon="shield">
+    Set appropriate `max_sensitivity` levels to enforce access control policies.
+  </Card>
+  
+  <Card title="Consistent Tagging" icon="tags">
+    Use a consistent tagging schema for easier retrieval and filtering.
+  </Card>
+  
+  <Card title="Feedback Loops" icon="arrows-rotate">
+    Use `reinforce()` and `penalize()` to train memory salience over time.
+  </Card>
+</CardGroup>

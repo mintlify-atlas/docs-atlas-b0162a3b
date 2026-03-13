@@ -1,0 +1,288 @@
+---
+title: 'Ingestion'
+description: 'API for ingesting data into the memory substrate'
+---
+
+The `ingestion` package orchestrates ingestion of raw data into the memory substrate. It classifies incoming data, applies policies, and creates structured memory records.
+
+## Service
+
+The ingestion service coordinates classification, policy application, and storage:
+
+```go
+type Service struct {
+    store      storage.Store
+    classifier *Classifier
+    policy     *PolicyEngine
+}
+
+func NewService(store storage.Store, classifier *Classifier, policy *PolicyEngine) *Service
+```
+
+## Ingestion Methods
+
+### IngestEvent()
+
+Creates an episodic memory record from an event.
+
+```go
+func (s *Service) IngestEvent(ctx context.Context, req IngestEventRequest) (*schema.MemoryRecord, error)
+```
+
+**Request:**
+```go
+type IngestEventRequest struct {
+    Source      string              // Actor or system that produced the event
+    EventKind   string              // Event type (e.g., "user_input", "error", "system")
+    Ref         string              // Reference identifier for the source event
+    Summary     string              // Optional human-readable summary
+    Timestamp   time.Time           // When the event occurred (defaults to now)
+    Tags        []string            // Optional labels for categorization
+    Scope       string              // Visibility scope
+    Sensitivity schema.Sensitivity  // Overrides default if set
+}
+```
+
+**Example:**
+```go
+rec, err := svc.IngestEvent(ctx, ingestion.IngestEventRequest{
+    Source:    "agent-1",
+    EventKind: "user_input",
+    Ref:       "msg-12345",
+    Summary:   "User asked about project status",
+    Timestamp: time.Now(),
+    Tags:      []string{"conversation", "status"},
+    Scope:     "project-alpha",
+})
+```
+
+### IngestToolOutput()
+
+Creates an episodic memory record with tool graph data from a tool invocation.
+
+```go
+func (s *Service) IngestToolOutput(ctx context.Context, req IngestToolOutputRequest) (*schema.MemoryRecord, error)
+```
+
+**Request:**
+```go
+type IngestToolOutputRequest struct {
+    Source      string              // Actor or system that invoked the tool
+    ToolName    string              // Name of the tool invoked
+    Args        map[string]any      // Arguments passed to the tool
+    Result      any                 // Output produced by the tool
+    DependsOn   []string            // IDs of tool nodes this depends on
+    Timestamp   time.Time           // When the tool was invoked
+    Tags        []string            // Optional labels
+    Scope       string              // Visibility scope
+    Sensitivity schema.Sensitivity  // Overrides default if set
+}
+```
+
+**Example:**
+```go
+rec, err := svc.IngestToolOutput(ctx, ingestion.IngestToolOutputRequest{
+    Source:   "agent-1",
+    ToolName: "read_file",
+    Args: map[string]any{
+        "path": "/home/user/config.yaml",
+    },
+    Result: map[string]any{
+        "content": "...",
+        "size":    1024,
+    },
+    Timestamp: time.Now(),
+    Tags:      []string{"filesystem", "read"},
+})
+```
+
+### IngestObservation()
+
+Creates a semantic memory record from an observation using subject-predicate-object structure.
+
+```go
+func (s *Service) IngestObservation(ctx context.Context, req IngestObservationRequest) (*schema.MemoryRecord, error)
+```
+
+**Request:**
+```go
+type IngestObservationRequest struct {
+    Source      string              // Actor or system that made the observation
+    Subject     string              // Entity the observation is about
+    Predicate   string              // Relationship or property observed
+    Object      any                 // Value or related entity observed
+    Timestamp   time.Time           // When the observation was made
+    Tags        []string            // Optional labels
+    Scope       string              // Visibility scope
+    Sensitivity schema.Sensitivity  // Overrides default if set
+}
+```
+
+**Example:**
+```go
+rec, err := svc.IngestObservation(ctx, ingestion.IngestObservationRequest{
+    Source:    "agent-1",
+    Subject:   "user-preferences",
+    Predicate: "prefers_language",
+    Object:    "python",
+    Timestamp: time.Now(),
+    Tags:      []string{"preferences"},
+})
+```
+
+### IngestOutcome()
+
+Updates an existing episodic record with outcome data.
+
+```go
+func (s *Service) IngestOutcome(ctx context.Context, req IngestOutcomeRequest) (*schema.MemoryRecord, error)
+```
+
+**Request:**
+```go
+type IngestOutcomeRequest struct {
+    Source         string               // Actor reporting the outcome
+    TargetRecordID string               // ID of the existing record to update
+    OutcomeStatus  schema.OutcomeStatus // Result (success, failure, partial)
+    Timestamp      time.Time            // When outcome was determined
+}
+```
+
+**OutcomeStatus Values:**
+- `schema.OutcomeStatusSuccess` - Experience completed successfully
+- `schema.OutcomeStatusFailure` - Experience ended in failure
+- `schema.OutcomeStatusPartial` - Partial success or incomplete outcome
+
+**Example:**
+```go
+rec, err := svc.IngestOutcome(ctx, ingestion.IngestOutcomeRequest{
+    Source:         "agent-1",
+    TargetRecordID: "episode-abc123",
+    OutcomeStatus:  schema.OutcomeStatusSuccess,
+    Timestamp:      time.Now(),
+})
+```
+
+### IngestWorkingState()
+
+Creates a working memory record from a task state snapshot.
+
+```go
+func (s *Service) IngestWorkingState(ctx context.Context, req IngestWorkingStateRequest) (*schema.MemoryRecord, error)
+```
+
+**Request:**
+```go
+type IngestWorkingStateRequest struct {
+    Source            string               // Actor that produced the working state
+    ThreadID          string               // Identifier for current thread/session
+    State             schema.TaskState     // Current task state
+    NextActions       []string             // Next planned actions
+    OpenQuestions     []string             // Unresolved questions
+    ContextSummary    string               // Summary of current context
+    ActiveConstraints []schema.Constraint  // Currently active constraints
+    Timestamp         time.Time            // When state was captured
+    Tags              []string             // Optional labels
+    Scope             string               // Visibility scope
+    Sensitivity       schema.Sensitivity   // Overrides default if set
+}
+```
+
+**TaskState Values:**
+- `schema.TaskStatePlanning` - Task is in planning phase
+- `schema.TaskStateExecuting` - Task is actively being executed
+- `schema.TaskStateBlocked` - Task cannot proceed due to blocker
+- `schema.TaskStateWaiting` - Task is waiting for external input
+- `schema.TaskStateDone` - Task has completed
+
+**Example:**
+```go
+rec, err := svc.IngestWorkingState(ctx, ingestion.IngestWorkingStateRequest{
+    Source:   "agent-1",
+    ThreadID: "task-456",
+    State:    schema.TaskStateExecuting,
+    NextActions: []string{
+        "validate user input",
+        "call external API",
+    },
+    OpenQuestions: []string{
+        "which API endpoint to use?",
+    },
+    ContextSummary: "Processing user request to fetch weather data",
+    ActiveConstraints: []schema.Constraint{
+        {
+            Type:     "rate_limit",
+            Key:      "api_calls_per_minute",
+            Value:    60,
+            Required: true,
+        },
+    },
+    Timestamp: time.Now(),
+})
+```
+
+## Complete Example
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "time"
+
+    "github.com/GustyCube/membrane/pkg/ingestion"
+    "github.com/GustyCube/membrane/pkg/schema"
+    "github.com/GustyCube/membrane/pkg/storage/sqlite"
+)
+
+func main() {
+    // Initialize storage
+    store, err := sqlite.Open("membrane.db", "")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer store.Close()
+
+    // Create ingestion service
+    classifier := ingestion.NewClassifier()
+    policyDefaults := ingestion.DefaultPolicyDefaults()
+    policyDefaults.Sensitivity = schema.SensitivityLow
+    policyEngine := ingestion.NewPolicyEngine(policyDefaults)
+    svc := ingestion.NewService(store, classifier, policyEngine)
+
+    ctx := context.Background()
+
+    // Ingest a tool output
+    toolRec, err := svc.IngestToolOutput(ctx, ingestion.IngestToolOutputRequest{
+        Source:   "agent-1",
+        ToolName: "search_files",
+        Args: map[string]any{
+            "pattern": "*.go",
+            "dir":     "/src",
+        },
+        Result: []string{
+            "main.go",
+            "handler.go",
+        },
+        Timestamp: time.Now(),
+        Tags:      []string{"search", "files"},
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    log.Printf("Ingested tool output: %s", toolRec.ID)
+
+    // Later, record the outcome
+    outcomeRec, err := svc.IngestOutcome(ctx, ingestion.IngestOutcomeRequest{
+        Source:         "agent-1",
+        TargetRecordID: toolRec.ID,
+        OutcomeStatus:  schema.OutcomeStatusSuccess,
+        Timestamp:      time.Now(),
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    log.Printf("Recorded outcome for: %s", outcomeRec.ID)
+}
+```

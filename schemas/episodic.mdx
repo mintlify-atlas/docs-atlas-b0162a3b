@@ -1,0 +1,223 @@
+---
+title: 'Episodic Memory'
+description: 'Raw experience captured as time-ordered sequences of events'
+icon: 'clock'
+---
+
+## Overview
+
+Episodic memory captures raw experience as time-ordered sequences of events. It serves as the foundational record of what happened, providing evidence for later learning and analysis.
+
+**Key Characteristics:**
+- Append-only and immutable (RFC 15A.6)
+- Time-ordered event sequences
+- Semantic correction is forbidden
+- Intentionally short-lived
+- Provides provenance for other memory types
+
+## Use Cases
+
+- Recording user inputs, tool calls, and system responses
+- Tracking errors and observations during task execution
+- Creating audit trails for debugging
+- Providing evidence for competence learning
+- Capturing environment snapshots for reproducibility
+
+## Schema
+
+<ParamField path="kind" type="string" required>
+  Payload type identifier. Must be `"episodic"`.
+</ParamField>
+
+<ParamField path="timeline" type="array" required>
+  Time-ordered sequence of events. Each event represents a discrete occurrence during the episode.
+  
+  <Expandable title="TimelineEvent properties">
+    <ResponseField name="t" type="timestamp" required>
+      The timestamp when the event occurred.
+    </ResponseField>
+    
+    <ResponseField name="event_kind" type="string" required>
+      Identifies the type of event (e.g., `"user_input"`, `"tool_call"`, `"error"`, `"observation"`).
+    </ResponseField>
+    
+    <ResponseField name="ref" type="string" required>
+      Reference to the event details (opaque identifier into the host system).
+    </ResponseField>
+    
+    <ResponseField name="summary" type="string">
+      Optional human-readable summary of the event.
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="tool_graph" type="array">
+  Captures tool calls and data flow during the episode.
+  
+  <Expandable title="ToolNode properties">
+    <ResponseField name="id" type="string" required>
+      Unique identifier for this tool node.
+    </ResponseField>
+    
+    <ResponseField name="tool" type="string" required>
+      Name or identifier of the tool that was invoked.
+    </ResponseField>
+    
+    <ResponseField name="args" type="object">
+      Arguments passed to the tool.
+    </ResponseField>
+    
+    <ResponseField name="result" type="any">
+      Output returned from the tool.
+    </ResponseField>
+    
+    <ResponseField name="timestamp" type="timestamp">
+      When the tool was invoked.
+    </ResponseField>
+    
+    <ResponseField name="depends_on" type="array">
+      Array of tool node IDs that this node depends on.
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="environment" type="object">
+  Captures the environment snapshot during the episode.
+  
+  <Expandable title="EnvironmentSnapshot properties">
+    <ResponseField name="os" type="string">
+      Operating system identifier (e.g., `"linux"`, `"darwin"`).
+    </ResponseField>
+    
+    <ResponseField name="os_version" type="string">
+      Operating system version.
+    </ResponseField>
+    
+    <ResponseField name="tool_versions" type="object">
+      Map of tool names to their versions.
+    </ResponseField>
+    
+    <ResponseField name="working_directory" type="string">
+      Current working directory during the episode.
+    </ResponseField>
+    
+    <ResponseField name="context" type="object">
+      Additional contextual information (implementation-defined).
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="outcome" type="string">
+  Indicates the result of the episode. One of:
+  - `"success"` - Episode completed successfully
+  - `"failure"` - Episode ended in failure
+  - `"partial"` - Partial success or incomplete outcome
+</ParamField>
+
+<ParamField path="artifacts" type="array">
+  References to external artifacts such as logs, screenshots, or files generated during the episode.
+</ParamField>
+
+<ParamField path="tool_graph_ref" type="string">
+  Optional reference to an external tool graph (for large graphs stored separately).
+</ParamField>
+
+## Example
+
+<CodeGroup>
+```json episodic-payload.json
+{
+  "kind": "episodic",
+  "timeline": [
+    {
+      "t": "2026-03-13T10:00:00Z",
+      "event_kind": "user_input",
+      "ref": "msg_abc123",
+      "summary": "User requested database schema migration"
+    },
+    {
+      "t": "2026-03-13T10:00:15Z",
+      "event_kind": "tool_call",
+      "ref": "tool_xyz789",
+      "summary": "Executed migration script"
+    },
+    {
+      "t": "2026-03-13T10:01:00Z",
+      "event_kind": "observation",
+      "ref": "obs_def456",
+      "summary": "Migration completed successfully"
+    }
+  ],
+  "tool_graph": [
+    {
+      "id": "tool_1",
+      "tool": "bash",
+      "args": {
+        "command": "npx prisma migrate deploy"
+      },
+      "result": {
+        "exit_code": 0,
+        "output": "Migration applied"
+      },
+      "timestamp": "2026-03-13T10:00:15Z"
+    }
+  ],
+  "environment": {
+    "os": "linux",
+    "os_version": "5.15.0",
+    "tool_versions": {
+      "node": "20.11.0",
+      "prisma": "5.9.1"
+    },
+    "working_directory": "/home/user/project"
+  },
+  "outcome": "success"
+}
+```
+</CodeGroup>
+
+## Lifecycle Rules
+
+### Immutability
+
+**Episodic payloads MUST be append-only** (RFC 15A.6). Once written, events in the timeline cannot be modified or deleted. Semantic correction is explicitly forbidden.
+
+If an error needs to be corrected, it must be recorded as a new event that supersedes the previous understanding, but the original event remains in the timeline.
+
+### Retention
+
+Episodic memory is intentionally short-lived:
+- High initial salience that decays over time
+- Automatically pruned when salience drops below threshold
+- Valuable episodes should be extracted into competence or semantic memory before decay
+
+### Evidence Chain
+
+Episodic records serve as evidence for:
+- **Semantic memory** - Facts extracted from observations
+- **Competence memory** - Procedures learned from successful episodes
+- **Plan graphs** - Solution patterns identified across episodes
+
+## Best Practices
+
+<Card title="Granularity" icon="layer-group">
+  Keep events at appropriate granularity. Each event should represent a meaningful state change or observation, not every system call.
+</Card>
+
+<Card title="References" icon="link">
+  Use the `ref` field to point to detailed logs or artifacts stored externally. The timeline should be compact and navigable.
+</Card>
+
+<Card title="Tool Graphs" icon="diagram-project">
+  For complex tool interactions, use `tool_graph` to capture dependencies and data flow. This enables later analysis of successful patterns.
+</Card>
+
+<Card title="Environment Context" icon="server">
+  Always capture environment snapshots for episodes that will inform competence learning. This ensures reproducibility.
+</Card>
+
+## Related
+
+- [Working Memory](/schemas/working) - Current task state
+- [Competence Memory](/schemas/competence) - Learned procedures
+- [Semantic Memory](/schemas/semantic) - Extracted facts

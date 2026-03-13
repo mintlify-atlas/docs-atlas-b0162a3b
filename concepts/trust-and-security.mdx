@@ -1,0 +1,693 @@
+---
+title: Trust & Security
+description: Sensitivity levels, trust-aware retrieval, encryption, and authentication in Membrane
+---
+
+Membrane implements a comprehensive security model that combines encryption at rest, TLS transport security, API key authentication, and graduated trust-based access control. Memory retrieval is conditioned on trust context, ensuring sensitive records are protected from unauthorized access.
+
+## Sensitivity Classification
+
+Every memory record is assigned a sensitivity level that determines who can access it:
+
+<Tabs>
+  <Tab title="Public">
+    **Level:** 0 (lowest)
+    
+    Content that can be freely shared with no restrictions.
+    
+    **Examples:**
+    - Public documentation links
+    - Open source project information
+    - Publicly available API endpoints
+    
+    ```go
+    const SensitivityPublic Sensitivity = "public"
+    ```
+  </Tab>
+  <Tab title="Low">
+    **Level:** 1
+    
+    Content with minimal sensitivity requiring basic authentication.
+    
+    **Examples:**
+    - User preferences (language, framework choices)
+    - Non-sensitive configuration
+    - General project metadata
+    
+    ```go
+    const SensitivityLow Sensitivity = "low"
+    ```
+  </Tab>
+  <Tab title="Medium">
+    **Level:** 2
+    
+    Moderately sensitive content requiring authenticated access.
+    
+    **Examples:**
+    - Project-specific configurations
+    - Tool usage patterns
+    - Internal API endpoints
+    - Competence records with proprietary procedures
+    
+    ```go
+    const SensitivityMedium Sensitivity = "medium"
+    ```
+  </Tab>
+  <Tab title="High">
+    **Level:** 3
+    
+    Highly sensitive content requiring elevated trust.
+    
+    **Examples:**
+    - Database connection strings (without credentials)
+    - Architecture decisions
+    - Security-relevant procedures
+    - PII metadata (not the PII itself)
+    
+    ```go
+    const SensitivityHigh Sensitivity = "high"
+    ```
+  </Tab>
+  <Tab title="Hyper">
+    **Level:** 4 (highest)
+    
+    Extremely sensitive content with maximum protection.
+    
+    **Examples:**
+    - API keys and credentials
+    - Encryption keys
+    - Authentication tokens
+    - PII (personally identifiable information)
+    
+    ```go
+    const SensitivityHyper Sensitivity = "hyper"
+    ```
+  </Tab>
+</Tabs>
+
+### Sensitivity Ordering
+
+```go
+// From pkg/retrieval/trust.go
+var sensitivityOrder = map[schema.Sensitivity]int{
+    schema.SensitivityPublic: 0,
+    schema.SensitivityLow:    1,
+    schema.SensitivityMedium: 2,
+    schema.SensitivityHigh:   3,
+    schema.SensitivityHyper:  4,
+}
+
+func SensitivityLevel(s schema.Sensitivity) int {
+    level, ok := sensitivityOrder[s]
+    if !ok {
+        return -1
+    }
+    return level
+}
+```
+
+## Trust Context
+
+Retrieval requests include a `TrustContext` that gates access to records:
+
+```go
+// From pkg/retrieval/trust.go
+type TrustContext struct {
+    // MaxSensitivity is the maximum sensitivity level the requester is allowed to access.
+    MaxSensitivity schema.Sensitivity
+    
+    // Authenticated indicates whether the requester has been authenticated.
+    Authenticated bool
+    
+    // ActorID identifies who is making the retrieval request.
+    ActorID string
+    
+    // Scopes lists the scopes the requester is allowed to access.
+    // An empty slice means all scopes are allowed.
+    Scopes []string
+}
+```
+
+### Access Rules
+
+A record is accessible if:
+
+1. **Sensitivity check:** Record sensitivity ≤ trust context's `MaxSensitivity`
+2. **Scope check:** Record scope matches one of the allowed scopes (or no scope restrictions apply)
+
+```go
+func (tc *TrustContext) Allows(record *schema.MemoryRecord) bool {
+    if record == nil {
+        return false
+    }
+    
+    // Check sensitivity: record sensitivity must be <= max allowed
+    recordLevel := SensitivityLevel(record.Sensitivity)
+    maxLevel := SensitivityLevel(tc.MaxSensitivity)
+    if recordLevel < 0 || maxLevel < 0 {
+        return false
+    }
+    if recordLevel > maxLevel {
+        return false
+    }
+    
+    // Check scope: if scopes are specified, record's scope must match one
+    if len(tc.Scopes) > 0 && record.Scope != "" {
+        found := false
+        for _, s := range tc.Scopes {
+            if s == record.Scope {
+                found = true
+                break
+            }
+        }
+        if !found {
+            return false
+        }
+    }
+    
+    return true
+}
+```
+
+## Graduated Exposure (Redacted Records)
+
+Records **exactly one level above** the trust context's maximum are returned in **redacted form**: metadata visible, but sensitive payload content removed.
+
+<Note>
+  This implements graduated exposure per RFC Section 13: "sensitive records may be summarized or withheld."
+</Note>
+
+```go
+func (tc *TrustContext) AllowsRedacted(record *schema.MemoryRecord) bool {
+    if record == nil {
+        return false
+    }
+    
+    recordLevel := SensitivityLevel(record.Sensitivity)
+    maxLevel := SensitivityLevel(tc.MaxSensitivity)
+    if recordLevel < 0 || maxLevel < 0 {
+        return false
+    }
+    
+    // Only allow redacted view if record is exactly one level above max
+    return recordLevel == maxLevel+1
+}
+```
+
+### Redaction Behavior
+
+| Trust Max | Record Sensitivity | Access |
+|-----------|-------------------|--------|
+| `low` | `public` | ✅ Full access |
+| `low` | `low` | ✅ Full access |
+| `low` | `medium` | ⚠️ Redacted (metadata only) |
+| `low` | `high` | ❌ Blocked |
+| `low` | `hyper` | ❌ Blocked |
+| `medium` | `low` | ✅ Full access |
+| `medium` | `medium` | ✅ Full access |
+| `medium` | `high` | ⚠️ Redacted (metadata only) |
+| `medium` | `hyper` | ❌ Blocked |
+
+**Redacted record includes:**
+- Record ID, type, sensitivity, confidence, salience
+- Creation and update timestamps
+- Tags and scope
+- Provenance links
+- **Excludes:** Payload content
+
+## Retrieval Examples
+
+<Tabs>
+  <Tab title="Go Library">
+    ```go
+    package main
+    
+    import (
+        "context"
+        "github.com/GustyCube/membrane/pkg/membrane"
+        "github.com/GustyCube/membrane/pkg/retrieval"
+        "github.com/GustyCube/membrane/pkg/schema"
+    )
+    
+    func retrieveWithTrust(ctx context.Context, m *membrane.Membrane) {
+        // Create trust context: authenticated user with medium access
+        trustCtx := &retrieval.TrustContext{
+            MaxSensitivity: schema.SensitivityMedium,
+            Authenticated:  true,
+            ActorID:        "agent-001",
+            Scopes:         []string{"project-acme"},
+        }
+        
+        resp, err := m.Retrieve(ctx, &retrieval.RetrieveRequest{
+            TaskDescriptor: "configure database connection",
+            Trust:          trustCtx,
+            MemoryTypes: []schema.MemoryType{
+                schema.MemoryTypeSemantic,
+                schema.MemoryTypeCompetence,
+            },
+            Limit: 10,
+        })
+        
+        for _, r := range resp.Records {
+            // Records with sensitivity <= medium: full access
+            // Records with sensitivity == high: redacted
+            // Records with sensitivity == hyper: blocked
+            fmt.Printf("Record %s (sensitivity=%s)\n", r.ID, r.Sensitivity)
+        }
+    }
+    ```
+  </Tab>
+  <Tab title="TypeScript Client">
+    ```typescript
+    import { MembraneClient, Sensitivity } from "@gustycube/membrane";
+    
+    const client = new MembraneClient("localhost:9090", { 
+      apiKey: process.env.MEMBRANE_API_KEY 
+    });
+    
+    async function retrieveWithTrust() {
+      const results = await client.retrieve(
+        "configure database connection",
+        {
+          trust: {
+            max_sensitivity: Sensitivity.MEDIUM,
+            authenticated: true,
+            actor_id: "agent-001",
+            scopes: ["project-acme"],
+          },
+          memoryTypes: ["semantic", "competence"],
+          limit: 10,
+        }
+      );
+      
+      results.forEach((record) => {
+        if (record.redacted) {
+          console.log(`Record ${record.id}: REDACTED`);
+        } else {
+          console.log(`Record ${record.id}:`, record.payload);
+        }
+      });
+    }
+    ```
+  </Tab>
+  <Tab title="Python Client">
+    ```python
+    from membrane import MembraneClient, Sensitivity, TrustContext
+    
+    client = MembraneClient("localhost:9090", api_key=os.getenv("MEMBRANE_API_KEY"))
+    
+    # Create trust context
+    trust = TrustContext(
+        max_sensitivity=Sensitivity.MEDIUM,
+        authenticated=True,
+        actor_id="agent-001",
+        scopes=["project-acme"],
+    )
+    
+    # Retrieve with trust context
+    results = client.retrieve(
+        task_descriptor="configure database connection",
+        trust=trust,
+        memory_types=["semantic", "competence"],
+        limit=10,
+    )
+    
+    for record in results:
+        if record.redacted:
+            print(f"Record {record.id}: REDACTED")
+        else:
+            print(f"Record {record.id}:", record.payload)
+    ```
+  </Tab>
+</Tabs>
+
+## Scope-Based Access Control
+
+Scopes provide additional access segmentation beyond sensitivity:
+
+### Scope Semantics
+
+| Scope | Description | Access |
+|-------|-------------|--------|
+| Empty (`""`) | Unscoped (global) | Available to all trust contexts |
+| `"user"` | User-specific | Only accessible with `"user"` scope |
+| `"project-X"` | Project-specific | Only accessible with `"project-X"` scope |
+| `"workspace-Y"` | Workspace-specific | Only accessible with `"workspace-Y"` scope |
+
+### Example: Multi-Project Isolation
+
+```go
+// Project A: Store preference scoped to project-a
+recA := schema.NewMemoryRecord(
+    uuid.New().String(),
+    schema.MemoryTypeSemantic,
+    schema.SensitivityLow,
+    &schema.SemanticPayload{
+        Subject:   "project",
+        Predicate: "database_engine",
+        Object:    "postgres",
+    },
+)
+recA.Scope = "project-a"
+m.IngestObservation(ctx, recA)
+
+// Project B: Store different preference scoped to project-b
+recB := schema.NewMemoryRecord(
+    uuid.New().String(),
+    schema.MemoryTypeSemantic,
+    schema.SensitivityLow,
+    &schema.SemanticPayload{
+        Subject:   "project",
+        Predicate: "database_engine",
+        Object:    "mysql",
+    },
+)
+recB.Scope = "project-b"
+m.IngestObservation(ctx, recB)
+
+// Retrieve for project-a: only sees postgres
+trustA := &retrieval.TrustContext{
+    MaxSensitivity: schema.SensitivityMedium,
+    Authenticated:  true,
+    ActorID:        "agent",
+    Scopes:         []string{"project-a"},
+}
+respA, _ := m.Retrieve(ctx, &retrieval.RetrieveRequest{
+    TaskDescriptor: "database preference",
+    Trust:          trustA,
+    MemoryTypes:    []schema.MemoryType{schema.MemoryTypeSemantic},
+})
+// respA.Records contains only project-a record
+```
+
+## Encryption at Rest
+
+Membrane supports encryption at rest for the authoritative store:
+
+### SQLite (Default)
+
+Uses **SQLCipher** with `PRAGMA key` applied at database open:
+
+```bash
+# Set encryption key via environment variable
+export MEMBRANE_ENCRYPTION_KEY="your-secure-key-here"
+
+# Start Membrane
+./bin/membraned --db membrane.db
+```
+
+```go
+// Encryption applied automatically when key is set
+cfg := membrane.DefaultConfig()
+cfg.DBPath = "membrane.db"
+cfg.EncryptionKey = os.Getenv("MEMBRANE_ENCRYPTION_KEY")
+
+m, err := membrane.New(cfg)
+// Database is encrypted at rest
+```
+
+### PostgreSQL
+
+PostgreSQL backend supports:
+
+1. **Full database encryption** via PostgreSQL's built-in encryption
+2. **Column-level encryption** for sensitive payloads (optional)
+3. **pgcrypto extension** for application-level encryption
+
+```yaml
+# config.yaml
+backend: "postgres"
+postgres_dsn: "postgres://membrane:pass@localhost:5432/membrane?sslmode=require"
+# encryption_key: "" # Optional column-level encryption
+```
+
+## TLS Transport Security
+
+Enable TLS for gRPC connections:
+
+<Tabs>
+  <Tab title="Server Configuration">
+    ```yaml
+    # config.yaml
+    listen_addr: ":9090"
+    tls_cert_file: "/path/to/server.crt"
+    tls_key_file: "/path/to/server.key"
+    ```
+    
+    ```bash
+    # Generate self-signed cert for development
+    openssl req -x509 -newkey rsa:4096 -keyout server.key -out server.crt -days 365 -nodes
+    
+    # Start with TLS
+    ./bin/membraned --config config.yaml
+    ```
+  </Tab>
+  <Tab title="Client (TypeScript)">
+    ```typescript
+    import { MembraneClient } from "@gustycube/membrane";
+    import fs from "fs";
+    
+    const client = new MembraneClient("localhost:9090", {
+      apiKey: "your-key",
+      tls: {
+        enabled: true,
+        ca: fs.readFileSync("/path/to/ca.crt"),
+        // Optional client cert
+        cert: fs.readFileSync("/path/to/client.crt"),
+        key: fs.readFileSync("/path/to/client.key"),
+      },
+    });
+    ```
+  </Tab>
+  <Tab title="Client (Python)">
+    ```python
+    from membrane import MembraneClient
+    
+    client = MembraneClient(
+        "localhost:9090",
+        api_key="your-key",
+        tls={
+            "enabled": True,
+            "ca_cert": "/path/to/ca.crt",
+            # Optional client cert
+            "client_cert": "/path/to/client.crt",
+            "client_key": "/path/to/client.key",
+        },
+    )
+    ```
+  </Tab>
+</Tabs>
+
+## API Key Authentication
+
+Membrane supports bearer token authentication via gRPC metadata:
+
+### Server Setup
+
+```yaml
+# config.yaml or environment variable
+api_key: ""  # Set via MEMBRANE_API_KEY environment variable
+```
+
+```bash
+export MEMBRANE_API_KEY="your-secret-api-key"
+./bin/membraned
+```
+
+### Client Usage
+
+<Tabs>
+  <Tab title="Go Library">
+    ```go
+    import (
+        "context"
+        "google.golang.org/grpc/metadata"
+    )
+    
+    // Add API key to context metadata
+    ctx := metadata.AppendToOutgoingContext(
+        context.Background(),
+        "authorization",
+        "Bearer your-secret-api-key",
+    )
+    
+    // Use ctx for all gRPC calls
+    resp, err := client.Retrieve(ctx, req)
+    ```
+  </Tab>
+  <Tab title="TypeScript">
+    ```typescript
+    // API key passed in constructor
+    const client = new MembraneClient("localhost:9090", {
+      apiKey: process.env.MEMBRANE_API_KEY,
+    });
+    
+    // All calls automatically include authentication
+    const results = await client.retrieve("task", {...});
+    ```
+  </Tab>
+  <Tab title="Python">
+    ```python
+    # API key passed in constructor
+    client = MembraneClient(
+        "localhost:9090",
+        api_key=os.getenv("MEMBRANE_API_KEY"),
+    )
+    
+    # All calls automatically include authentication
+    results = client.retrieve("task", ...)
+    ```
+  </Tab>
+  <Tab title="cURL (gRPC)">
+    ```bash
+    # Using grpcurl
+    grpcurl \
+      -H "authorization: Bearer your-secret-api-key" \
+      -d '{"task_descriptor": "example"}' \
+      localhost:9090 \
+      membrane.v1.MembraneService/Retrieve
+    ```
+  </Tab>
+</Tabs>
+
+## Rate Limiting
+
+Membrane includes a token bucket rate limiter:
+
+```yaml
+# config.yaml
+rate_limit_per_second: 100  # Default: 100 requests/second
+```
+
+Rate limiting applies to:
+- All gRPC methods
+- Per-connection (not global)
+- Configurable burst size (default: 2x rate)
+
+## Input Validation
+
+Membrane validates all inputs to prevent injection and resource exhaustion:
+
+<CardGroup cols={2}>
+  <Card title="Payload Size Limits" icon="scale-balanced">
+    - Maximum payload size: 10 MB
+    - Episodic timeline: max 10,000 events
+    - Plan graph: max 1,000 nodes
+  </Card>
+  <Card title="String Length Checks" icon="ruler">
+    - Summary: max 2,000 characters
+    - Rationale: max 1,000 characters
+    - Tag: max 100 characters
+  </Card>
+  <Card title="Count Limits" icon="hashtag">
+    - Tags per record: max 50
+    - Relations per record: max 100
+    - Recipe steps: max 100
+  </Card>
+  <Card title="Value Checks" icon="check">
+    - Confidence: [0, 1]
+    - Salience: [0, ∞)
+    - Rejects NaN and Inf values
+  </Card>
+</CardGroup>
+
+## Security Best Practices
+
+<Accordion title="1. Use Environment Variables for Secrets">
+  Never hardcode API keys, encryption keys, or DSNs in configuration files or code.
+  
+  ```bash
+  # Good
+  export MEMBRANE_API_KEY="secret"
+  export MEMBRANE_ENCRYPTION_KEY="key"
+  export MEMBRANE_POSTGRES_DSN="postgres://..."
+  
+  # Bad (hardcoded in config.yaml)
+  api_key: "secret"  # ❌ DO NOT DO THIS
+  ```
+</Accordion>
+
+<Accordion title="2. Enable TLS in Production">
+  Always use TLS for gRPC connections in production environments.
+  
+  - Use valid certificates from a trusted CA
+  - Enable client certificate validation when possible
+  - Rotate certificates regularly
+</Accordion>
+
+<Accordion title="3. Classify Sensitivity Conservatively">
+  When in doubt, classify records at a higher sensitivity level.
+  
+  ```go
+  // When unsure, prefer higher sensitivity
+  rec.Sensitivity = schema.SensitivityMedium // ✅ Safe default
+  // NOT
+  rec.Sensitivity = schema.SensitivityLow    // ⚠️ May expose sensitive data
+  ```
+</Accordion>
+
+<Accordion title="4. Use Scopes for Multi-Tenancy">
+  Scope all records to specific users, projects, or workspaces.
+  
+  ```go
+  rec.Scope = fmt.Sprintf("user:%s", userID)
+  // OR
+  rec.Scope = fmt.Sprintf("project:%s", projectID)
+  ```
+</Accordion>
+
+<Accordion title="5. Audit Trust Context Usage">
+  Log all retrieval requests with trust context for audit trails.
+  
+  ```go
+  log.Info("Retrieval request",
+      "actor", trustCtx.ActorID,
+      "max_sensitivity", trustCtx.MaxSensitivity,
+      "scopes", trustCtx.Scopes,
+      "task", taskDescriptor,
+  )
+  ```
+</Accordion>
+
+<Accordion title="6. Do Not Store Raw Credentials">
+  Even with `hyper` sensitivity, prefer storing references to secrets rather than raw credentials.
+  
+  ```go
+  // Good: reference to secret manager
+  rec.Payload = &schema.SemanticPayload{
+      Subject:   "api",
+      Predicate: "key_reference",
+      Object:    "aws:secretsmanager:api-key-001",
+  }
+  
+  // Bad: raw credential
+  rec.Payload = &schema.SemanticPayload{
+      Subject:   "api",
+      Predicate: "key",
+      Object:    "sk_live_abc123...", // ❌ DO NOT STORE RAW KEYS
+  }
+  ```
+</Accordion>
+
+## Security Guarantees
+
+<Note>
+  Membrane provides the following security guarantees:
+  
+  1. **Confidentiality:** Sensitive records are never returned to unauthorized callers
+  2. **Integrity:** All revisions are atomic and auditable
+  3. **Availability:** Rate limiting prevents resource exhaustion
+  4. **Non-repudiation:** Audit logs track all actions to actors
+  5. **Defense in depth:** Multiple layers (encryption, TLS, auth, trust gating)
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    Learn about the three-plane architecture and deployment tiers
+  </Card>
+  <Card title="Decay & Consolidation" icon="clock-rotate-left" href="/concepts/decay-and-consolidation">
+    Understand how memory evolves over time
+  </Card>
+</CardGroup>

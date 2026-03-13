@@ -1,0 +1,504 @@
+---
+title: Performance Tuning
+description: Optimize Membrane for high-throughput and low-latency workloads
+---
+
+Membrane is designed for production workloads with efficient indexing, connection pooling, and batching strategies.
+
+---
+
+## Storage Backend Performance
+
+### SQLite (Tier 1)
+
+**Strengths:**
+
+- Zero network latency
+- Excellent single-threaded read performance
+- WAL mode enables concurrent readers
+
+**Limitations:**
+
+- Single writer (serialized transactions)
+- No horizontal scaling
+- Not suitable for multi-process deployments
+
+**Tuning:**
+
+```go
+// SQLite opens with these pragmas by default:
+dsn := "membrane.db?_foreign_keys=on&_journal_mode=WAL&_busy_timeout=5000"
+```
+
+- `_journal_mode=WAL`: Write-ahead logging (faster writes, concurrent reads)
+- `_busy_timeout=5000`: Wait 5 seconds for locks before failing
+- `_foreign_keys=on`: Enforce referential integrity
+
+For extremely high read concurrency, increase `_busy_timeout` or use connection pooling.
+
+### Postgres (Tier 2+)
+
+**Strengths:**
+
+- Full concurrent read/write support
+- Horizontal scaling via read replicas
+- JSONB indexing for fast payload queries
+- Battle-tested for production workloads
+
+**Limitations:**
+
+- Network latency for remote databases
+- Requires operational expertise (backups, tuning, monitoring)
+
+**Tuning:**
+
+```ini postgresql.conf
+# Memory
+shared_buffers = 256MB          # 25% of system RAM
+work_mem = 16MB                 # per-sort buffer
+maintenance_work_mem = 128MB    # for index builds
+
+# Connections
+max_connections = 100
+
+# Checkpoints
+checkpoint_completion_target = 0.9
+wal_buffers = 16MB
+
+# Planner
+random_page_cost = 1.1          # for SSDs
+effective_cache_size = 1GB      # hint for query planner
+```
+
+---
+
+## Connection Pooling
+
+### SQLite
+
+SQLite uses a single connection with serializable transactions. No pooling needed.
+
+### Postgres (pgx)
+
+The `pgx` driver pools connections by default.
+
+**Default settings:**
+
+```go
+MaxConns:          4
+MinConns:          0
+MaxConnLifetime:   1 hour
+MaxConnIdleTime:   30 minutes
+HealthCheckPeriod: 1 minute
+```
+
+**Custom pool via DSN:**
+
+```bash
+postgres://membrane:membrane@localhost:5432/membrane?pool_max_conns=20&pool_min_conns=5
+```
+
+**Sizing guidelines:**
+
+- **Low concurrency** (1-5 clients): `pool_max_conns=4` (default)
+- **Medium concurrency** (5-20 clients): `pool_max_conns=10-20`
+- **High concurrency** (20+ clients): `pool_max_conns=50+` or use PgBouncer
+
+<Note>
+Each connection consumes memory (default: ~10MB). Don't over-provision. Monitor `pg_stat_activity` to see actual usage.
+</Note>
+
+---
+
+## Query Optimization
+
+### Indexes
+
+Membrane creates indexes optimized for retrieval queries.
+
+**Core indexes:**
+
+```sql
+CREATE INDEX idx_records_type_salience ON memory_records(type, salience DESC);
+CREATE INDEX idx_records_scope_sensitivity ON memory_records(scope, sensitivity);
+CREATE INDEX idx_tags_tag ON tags(tag);
+```
+
+### Batch Fetching
+
+The `getRecordsBatch` function avoids N+1 queries by fetching related data in bulk:
+
+```go
+// Instead of:
+for _, id := range ids {
+    rec, _ := getRecord(ctx, q, id)  // N queries
+}
+
+// Membrane does:
+records, _ := getRecordsBatch(ctx, q, ids)  // 1 query per table
+```
+
+For lists with >3 records, Membrane uses `IN (...)` queries:
+
+```sql
+SELECT * FROM memory_records WHERE id IN ($1, $2, ..., $N);
+SELECT * FROM payloads WHERE record_id IN ($1, $2, ..., $N);
+-- etc.
+```
+
+### JSONB Queries (Postgres)
+
+Payloads are stored as JSONB for efficient querying:
+
+```sql
+-- Find semantic records by subject
+SELECT mr.id
+FROM memory_records mr
+JOIN payloads p ON mr.id = p.record_id
+WHERE mr.type = 'semantic'
+  AND p.payload_json->>'subject' = 'user-123';
+```
+
+For frequent queries, add a GIN index:
+
+```sql
+CREATE INDEX idx_payloads_jsonb ON payloads USING GIN (payload_json);
+```
+
+---
+
+## Caching Strategies
+
+Membrane does not include built-in caching. For high-read workloads:
+
+### In-Memory Cache (Application-Level)
+
+```go
+import "github.com/hashicorp/golang-lru/v2"
+
+cache, _ := lru.New[string, *schema.MemoryRecord](1000)
+
+func getCached(ctx context.Context, id string) (*schema.MemoryRecord, error) {
+    if rec, ok := cache.Get(id); ok {
+        return rec, nil
+    }
+    rec, err := store.Get(ctx, id)
+    if err == nil {
+        cache.Add(id, rec)
+    }
+    return rec, err
+}
+```
+
+### Redis Cache
+
+```go
+import "github.com/redis/go-redis/v9"
+
+rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
+
+func getCached(ctx context.Context, id string) (*schema.MemoryRecord, error) {
+    val, err := rdb.Get(ctx, "mem:"+id).Result()
+    if err == nil {
+        var rec schema.MemoryRecord
+        json.Unmarshal([]byte(val), &rec)
+        return &rec, nil
+    }
+    rec, err := store.Get(ctx, id)
+    if err == nil {
+        data, _ := json.Marshal(rec)
+        rdb.Set(ctx, "mem:"+id, data, 10*time.Minute)
+    }
+    return rec, err
+}
+```
+
+**Cache invalidation:**
+
+Invalidate on update/delete:
+
+```go
+func updateAndInvalidate(ctx context.Context, rec *schema.MemoryRecord) error {
+    if err := store.Update(ctx, rec); err != nil {
+        return err
+    }
+    rdb.Del(ctx, "mem:"+rec.ID)
+    return nil
+}
+```
+
+---
+
+## Vector Search Performance
+
+### IVFFlat Tuning
+
+The default IVFFlat index uses 100 lists:
+
+```sql
+CREATE INDEX idx_trigger_embeddings_ann
+    ON trigger_embeddings USING ivfflat (embedding vector_cosine_ops)
+    WITH (lists = 100);
+```
+
+**Tuning `lists`:**
+
+| Dataset Size | Recommended `lists` |
+|--------------|---------------------|
+| < 10k        | 100                 |
+| 10k - 100k   | 500                 |
+| 100k - 1M    | 1000                |
+| > 1M         | Use HNSW            |
+
+**Rule of thumb:** `lists ≈ sqrt(num_embeddings)`
+
+### HNSW (Faster Queries)
+
+```sql
+DROP INDEX idx_trigger_embeddings_ann;
+CREATE INDEX idx_trigger_embeddings_hnsw
+    ON trigger_embeddings USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+```
+
+**HNSW parameters:**
+
+- `m`: Connections per node (default: 16, higher = better recall, more memory)
+- `ef_construction`: Build-time search depth (default: 64, higher = slower build, better index quality)
+
+**Query-time tuning:**
+
+```sql
+SET hnsw.ef_search = 100;  -- default: 40, higher = better recall, slower query
+```
+
+### Embedding API Latency
+
+Embeddings are generated **synchronously** during ingestion:
+
+- OpenAI API: ~50-200ms per request
+- Self-hosted (local GPU): ~5-50ms per request
+
+For high-throughput ingestion:
+
+1. **Batch ingests**: Queue ingests and process in parallel
+2. **Pre-compute embeddings**: Generate embeddings offline and store them
+3. **Use a faster model**: `text-embedding-3-small` is 2x faster than `3-large`
+
+---
+
+## Consolidation and Decay Performance
+
+### Background Job Intervals
+
+Defaults:
+
+```yaml config.yaml
+decay_interval: "1h"
+consolidation_interval: "6h"
+```
+
+**Tuning:**
+
+- **High-frequency decay**: `decay_interval: "15m"` (for fast salience updates)
+- **Low-frequency consolidation**: `consolidation_interval: "24h"` (for large episodic volumes)
+
+### Decay Performance
+
+Decay updates salience for all active records:
+
+```sql
+UPDATE memory_records
+SET salience = <computed_salience>
+WHERE salience > 0;
+```
+
+For large datasets (>100k records), this can take seconds. Optimize:
+
+1. **Index on salience**: Already created by default
+2. **Batch updates**: Process in chunks of 10k records
+3. **Async decay**: Run decay in a separate goroutine
+
+### Consolidation Performance
+
+Consolidation extracts semantic facts from episodic records using an LLM API.
+
+**Bottleneck:** LLM API latency (1-5 seconds per episodic record)
+
+**Optimization:**
+
+1. **Batch extraction**: Send multiple episodic records per LLM call
+2. **Parallel workers**: Run 5-10 extraction workers concurrently
+3. **Claim-based queue**: Use `ClaimUnextractedEpisodics` to avoid duplicate work
+
+---
+
+## Benchmarks
+
+### Test Environment
+
+- **Hardware**: M1 MacBook Pro, 16GB RAM, SSD
+- **Database**: Postgres 16 with pgvector
+- **Dataset**: 35 records, 18 queries
+- **Date**: Feb 5, 2026 (from README)
+
+### Results
+
+#### Unit/Integration Tests
+
+```bash
+22 top-level eval tests + 7 subtests = 29 test cases
+0 failures
+~0.40s total runtime
+```
+
+#### Vector Retrieval (E2E)
+
+```bash
+35 records, 18 queries
+Recall@k:    1.000
+Precision@k: 0.267
+MRR@k:       0.956
+NDCG@k:      0.955
+```
+
+<Note>
+These benchmarks are scenario-level regression checks, not universal performance metrics. Real-world performance depends on dataset size, query patterns, and infrastructure.
+</Note>
+
+### Scaling Estimates
+
+| Operation | SQLite (local) | Postgres (local) | Postgres (remote) |
+|-----------|----------------|------------------|-------------------|
+| Ingest (no embedding) | ~1ms | ~2ms | ~10ms (network) |
+| Ingest (with embedding) | ~100ms | ~100ms | ~150ms |
+| Retrieve (10 records) | ~5ms | ~10ms | ~20ms |
+| Vector search (1k embeddings) | N/A | ~10ms (IVFFlat) | ~15ms |
+| Decay (10k records) | ~500ms | ~200ms | ~300ms |
+
+---
+
+## Profiling
+
+### Go pprof
+
+Enable profiling in the daemon:
+
+```go
+import _ "net/http/pprof"
+
+go func() {
+    log.Println(http.ListenAndServe("localhost:6060", nil))
+}()
+```
+
+Then profile CPU usage:
+
+```bash
+go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
+```
+
+Memory usage:
+
+```bash
+go tool pprof http://localhost:6060/debug/pprof/heap
+```
+
+### Postgres Query Stats
+
+Enable `pg_stat_statements`:
+
+```sql
+CREATE EXTENSION pg_stat_statements;
+```
+
+Query slow queries:
+
+```sql
+SELECT 
+    query,
+    calls,
+    mean_exec_time,
+    max_exec_time
+FROM pg_stat_statements
+ORDER BY mean_exec_time DESC
+LIMIT 10;
+```
+
+---
+
+## Troubleshooting Performance Issues
+
+### High Latency on Ingest
+
+**Cause:** Embedding API latency
+
+**Fix:**
+
+1. Use a faster embedding model (`text-embedding-3-small`)
+2. Self-host embeddings (local GPU)
+3. Batch ingests and parallelize
+
+### Slow Retrieval Queries
+
+**Cause:** Missing indexes or large result sets
+
+**Fix:**
+
+1. Run `EXPLAIN ANALYZE` on slow queries
+2. Add indexes for frequent filters (e.g., tags, scope)
+3. Reduce `limit` in retrieval requests
+
+### High Memory Usage
+
+**Cause:** Large connection pool or payload sizes
+
+**Fix:**
+
+1. Reduce `pool_max_conns`
+2. Limit payload sizes in ingestion validation
+3. Enable payload compression (requires code modification)
+
+### Decay/Consolidation Taking Too Long
+
+**Cause:** Large dataset or slow LLM API
+
+**Fix:**
+
+1. Increase `decay_interval` / `consolidation_interval`
+2. Batch updates in chunks
+3. Use a faster LLM model or self-hosted inference
+
+---
+
+## Production Deployment Checklist
+
+<Steps>
+  <Step title="Use Postgres for concurrency">
+    Tier 2+ for multi-agent deployments.
+  </Step>
+
+  <Step title="Tune connection pool">
+    Set `pool_max_conns` based on expected concurrency.
+  </Step>
+
+  <Step title="Enable vector indexes">
+    Use HNSW for large datasets (>100k embeddings).
+  </Step>
+
+  <Step title="Monitor query performance">
+    Enable `pg_stat_statements` and review slow queries weekly.
+  </Step>
+
+  <Step title="Implement caching">
+    Use Redis or in-memory LRU for frequently accessed records.
+  </Step>
+
+  <Step title="Profile regularly">
+    Run `pprof` on production workloads to identify bottlenecks.
+  </Step>
+
+  <Step title="Set up backups">
+    Use `pg_dump` or continuous archiving for disaster recovery.
+  </Step>
+</Steps>

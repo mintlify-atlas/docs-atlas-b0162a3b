@@ -1,0 +1,560 @@
+---
+title: Memory Types
+description: The five memory types in Membrane, their schemas, lifecycle rules, and usage patterns
+---
+
+Membrane defines five distinct memory types, each with explicit schemas, lifecycle rules, and consolidation behavior. This separation allows different kinds of knowledge to be stored, retrieved, and revised according to their specific characteristics.
+
+<Note>
+  All memory types conform to the canonical schemas defined in RFC 15A. Implementations MUST preserve these shapes and field meanings.
+</Note>
+
+## Overview
+
+| Type | Purpose | Mutability | Decay Behavior |
+|------|---------|------------|----------------|
+| **Episodic** | Raw experience capture | Immutable | Fast (hours to days) |
+| **Working** | Current task state | Freely editable | Fast (minutes to hours) |
+| **Semantic** | Stable facts and preferences | Revisable via operations | Slow (weeks to months) |
+| **Competence** | Learned procedures | Versioned, revisable | Slow (weeks to months) |
+| **Plan Graph** | Reusable solution structures | Versioned, revisable | Slow (weeks to months) |
+
+## Episodic Memory
+
+**Purpose:** Captures raw experience as immutable, time-ordered sequences of events.
+
+<Warning>
+  Episodic records are append-only. They MUST NOT be edited for semantic correctness. Corrections occur through higher-level memory types.
+</Warning>
+
+### Schema
+
+```go
+// From pkg/schema/payloads.go
+type EpisodicPayload struct {
+    Kind string `json:"kind"` // "episodic"
+    
+    // Required: time-ordered sequence of events
+    Timeline []TimelineEvent `json:"timeline"
+    
+    // Optional: tool calls and data flow
+    ToolGraph []ToolNode `json:"tool_graph,omitempty"
+    
+    // Optional: environment snapshot (OS, versions, context)
+    Environment *EnvironmentSnapshot `json:"environment,omitempty"
+    
+    // Optional: success | failure | partial
+    Outcome OutcomeStatus `json:"outcome,omitempty"
+    
+    // Optional: references to logs, screenshots, files
+    Artifacts []string `json:"artifacts,omitempty"
+    
+    ToolGraphRef string `json:"tool_graph_ref,omitempty"
+}
+
+type TimelineEvent struct {
+    T         time.Time `json:"t"`           // Timestamp
+    EventKind string    `json:"event_kind"`  // Event type
+    Ref       string    `json:"ref"`         // Reference to details
+    Summary   string    `json:"summary,omitempty"` // Human-readable summary
+}
+```
+
+### Lifecycle Rules
+
+1. **Creation:** Ingested via `IngestEvent`, `IngestToolOutput`, or `IngestOutcome`
+2. **Immutability:** Cannot be revised after creation
+3. **Decay:** Salience decays rapidly (default half-life: 7 days)
+4. **Compression:** After 24 hours, salience is multiplied by 0.5 (floor: 0.05)
+5. **Deletion:** Auto-pruned when salience reaches floor
+
+### Example
+
+<Tabs>
+  <Tab title="Build Failure Episode">
+    ```json
+    {
+      "id": "ep-42abc",
+      "type": "episodic",
+      "sensitivity": "low",
+      "confidence": 1.0,
+      "salience": 0.8,
+      "payload": {
+        "kind": "episodic",
+        "timeline": [
+          {
+            "t": "2026-03-13T10:15:00Z",
+            "event_kind": "tool_call",
+            "ref": "build#123",
+            "summary": "Executed: go build"
+          },
+          {
+            "t": "2026-03-13T10:15:03Z",
+            "event_kind": "error",
+            "ref": "err#456",
+            "summary": "ld: cache mismatch error"
+          },
+          {
+            "t": "2026-03-13T10:16:00Z",
+            "event_kind": "tool_call",
+            "ref": "shell#789",
+            "summary": "Cleared build cache"
+          },
+          {
+            "t": "2026-03-13T10:16:30Z",
+            "event_kind": "tool_call",
+            "ref": "build#124",
+            "summary": "Retry: go build -a"
+          }
+        ],
+        "outcome": "success",
+        "environment": {
+          "os": "darwin",
+          "os_version": "14.2.1",
+          "tool_versions": {"go": "1.22.1"}
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Go Code">
+    ```go
+    package main
+    
+    import (
+        "context"
+        "github.com/GustyCube/membrane/pkg/ingestion"
+        "github.com/GustyCube/membrane/pkg/schema"
+    )
+    
+    func ingestBuildFailure(ctx context.Context, m *membrane.Membrane) {
+        rec, err := m.IngestEvent(ctx, ingestion.IngestEventRequest{
+            Source:    "build-agent",
+            EventKind: "tool_call",
+            Ref:       "build#123",
+            Summary:   "Executed go build, failed with linker cache error",
+            Tags:      []string{"build", "error", "linker"},
+        })
+        // Later: mark outcome
+        m.IngestOutcome(ctx, ingestion.IngestOutcomeRequest{
+            RecordID: rec.ID,
+            Outcome:  schema.OutcomeStatusSuccess,
+            Summary:  "Resolved by clearing cache and rebuilding",
+        })
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Working Memory
+
+**Purpose:** Tracks the current state of ongoing tasks, enabling resumption across sessions.
+
+### Schema
+
+```go
+type WorkingPayload struct {
+    Kind     string    `json:"kind"` // "working"
+    ThreadID string    `json:"thread_id"`
+    State    TaskState `json:"state"` // planning | executing | blocked | waiting | done
+    
+    // Optional fields
+    ActiveConstraints []Constraint `json:"active_constraints,omitempty"`
+    NextActions       []string     `json:"next_actions,omitempty"`
+    OpenQuestions     []string     `json:"open_questions,omitempty"`
+    ContextSummary    string       `json:"context_summary,omitempty"`
+}
+
+type TaskState string
+
+const (
+    TaskStatePlanning  TaskState = "planning"
+    TaskStateExecuting TaskState = "executing"
+    TaskStateBlocked   TaskState = "blocked"
+    TaskStateWaiting   TaskState = "waiting"
+    TaskStateDone      TaskState = "done"
+)
+```
+
+### Lifecycle Rules
+
+1. **Creation:** Ingested via `IngestWorkingState`
+2. **Updates:** Freely editable; state transitions update the same record
+3. **Decay:** Fast decay (default half-life: 3 hours)
+4. **Deletion:** Auto-pruned when task completes or becomes stale
+
+### Example
+
+```json
+{
+  "id": "work-session-001",
+  "type": "working",
+  "sensitivity": "low",
+  "confidence": 1.0,
+  "salience": 1.0,
+  "payload": {
+    "kind": "working",
+    "thread_id": "session-001",
+    "state": "executing",
+    "next_actions": [
+      "run tests",
+      "deploy to staging",
+      "update documentation"
+    ],
+    "open_questions": [
+      "Should we enable feature flag X?"
+    ],
+    "context_summary": "Backend initialized with Go 1.22, frontend setup pending"
+  }
+}
+```
+
+## Semantic Memory
+
+**Purpose:** Stores stable facts, preferences, and relationships as subject-predicate-object triples.
+
+<Note>
+  Semantic records support **conditional validity**, allowing multiple facts about the same subject to coexist with different applicability conditions.
+</Note>
+
+### Schema
+
+```go
+type SemanticPayload struct {
+    Kind      string   `json:"kind"` // "semantic"
+    Subject   string   `json:"subject"`
+    Predicate string   `json:"predicate"`
+    Object    any      `json:"object"` // string, number, boolean, object, or array
+    Validity  Validity `json:"validity"`
+    
+    // Optional
+    Evidence       []ProvenanceRef `json:"evidence,omitempty"`
+    RevisionPolicy string          `json:"revision_policy,omitempty"` // replace | fork | contest
+    Revision       *RevisionState  `json:"revision,omitempty"`
+}
+
+type Validity struct {
+    Mode       ValidityMode   `json:"mode"` // global | conditional | timeboxed
+    Conditions map[string]any `json:"conditions,omitempty"`
+    Start      *time.Time     `json:"start,omitempty"`
+    End        *time.Time     `json:"end,omitempty"`
+}
+```
+
+### Lifecycle Rules
+
+1. **Creation:** Ingested via `IngestObservation` or promoted during consolidation
+2. **Revision:** Via `Supersede`, `Fork`, `Contest`, `Retract`, `Merge` operations
+3. **Evidence required:** All semantic revisions must include evidence references
+4. **Decay:** Slow decay (default half-life: 90 days)
+5. **Deletion:** Manual or via retraction
+
+### Examples
+
+<Tabs>
+  <Tab title="Global Preference">
+    ```json
+    {
+      "id": "sem-pref-001",
+      "type": "semantic",
+      "sensitivity": "low",
+      "confidence": 0.9,
+      "salience": 0.85,
+      "payload": {
+        "kind": "semantic",
+        "subject": "user",
+        "predicate": "prefers_backend_language",
+        "object": "go",
+        "validity": {
+          "mode": "global"
+        },
+        "revision": {
+          "status": "active"
+        }
+      }
+    }
+    ```
+  </Tab>
+  <Tab title="Conditional Preference">
+    ```json
+    {
+      "id": "sem-pref-002",
+      "type": "semantic",
+      "sensitivity": "low",
+      "confidence": 0.95,
+      "salience": 0.90,
+      "payload": {
+        "kind": "semantic",
+        "subject": "user",
+        "predicate": "prefers_backend_language",
+        "object": "python",
+        "validity": {
+          "mode": "conditional",
+          "conditions": {
+            "project_kind": "data_science"
+          }
+        },
+        "revision": {
+          "status": "active"
+        }
+      }
+    }
+    ```
+    
+    Both preferences can coexist. Retrieval selects based on current context.
+  </Tab>
+  <Tab title="Timeboxed Fact">
+    ```json
+    {
+      "id": "sem-fact-003",
+      "type": "semantic",
+      "sensitivity": "medium",
+      "confidence": 1.0,
+      "salience": 1.0,
+      "payload": {
+        "kind": "semantic",
+        "subject": "api_key_rotation",
+        "predicate": "next_rotation_date",
+        "object": "2026-06-01T00:00:00Z",
+        "validity": {
+          "mode": "timeboxed",
+          "start": "2026-03-01T00:00:00Z",
+          "end": "2026-06-01T00:00:00Z"
+        }
+      }
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Competence Memory
+
+**Purpose:** Encodes procedural knowledge—how to achieve goals reliably under specific conditions.
+
+### Schema
+
+```go
+type CompetencePayload struct {
+    Kind      string  `json:"kind"` // "competence"
+    SkillName string  `json:"skill_name"`
+    Triggers  []Trigger     `json:"triggers"`
+    Recipe    []RecipeStep  `json:"recipe"`
+    
+    // Optional
+    RequiredTools []string          `json:"required_tools,omitempty"`
+    FailureModes  []string          `json:"failure_modes,omitempty"`
+    Fallbacks     []string          `json:"fallbacks,omitempty"`
+    Performance   *PerformanceStats `json:"performance,omitempty"`
+    Version       string            `json:"version,omitempty"`
+}
+
+type Trigger struct {
+    Signal     string         `json:"signal"` // e.g., error signature, intent label
+    Conditions map[string]any `json:"conditions,omitempty"`
+}
+
+type RecipeStep struct {
+    Step       string         `json:"step"`
+    Tool       string         `json:"tool,omitempty"`
+    ArgsSchema map[string]any `json:"args_schema,omitempty"`
+    Validation string         `json:"validation,omitempty"`
+}
+```
+
+### Lifecycle Rules
+
+1. **Creation:** Extracted during consolidation from repeated successful episodic patterns (≥2 occurrences)
+2. **Selection:** Multiple competence records may exist for the same problem; selected by context and success rate
+3. **Reinforcement:** Success rate updated based on outcomes; salience increased on success
+4. **Versioning:** Supersede creates new version rather than overwriting
+5. **Decay:** Slow decay (default half-life: 60 days)
+
+### Example
+
+```json
+{
+  "id": "comp-linker-fix",
+  "type": "competence",
+  "sensitivity": "medium",
+  "confidence": 0.7,
+  "salience": 0.6,
+  "payload": {
+    "kind": "competence",
+    "skill_name": "fix_linker_cache_error",
+    "triggers": [
+      {
+        "signal": "ld: cache mismatch",
+        "conditions": {"os": "macos"}
+      }
+    ],
+    "recipe": [
+      {
+        "step": "Clear build cache",
+        "tool": "shell",
+        "validation": "cache directory removed"
+      },
+      {
+        "step": "Rebuild with clean flags",
+        "tool": "build",
+        "validation": "build succeeds"
+      }
+    ],
+    "failure_modes": [
+      "If cache directory is locked, retry with elevated permissions"
+    ],
+    "fallbacks": [
+      "Reinstall toolchain"
+    ],
+    "performance": {
+      "success_count": 8,
+      "failure_count": 1,
+      "success_rate": 0.89
+    },
+    "version": "1.0"
+  }
+}
+```
+
+## Plan Graph Memory
+
+**Purpose:** Stores reusable solution structures as directed graphs of actions with dependencies.
+
+### Schema
+
+```go
+type PlanGraphPayload struct {
+    Kind    string `json:"kind"` // "plan_graph"
+    PlanID  string `json:"plan_id"`
+    Version string `json:"version"`
+    
+    Nodes []PlanNode `json:"nodes"`
+    Edges []PlanEdge `json:"edges"`
+    
+    // Optional
+    Intent        string         `json:"intent,omitempty"`
+    Constraints   map[string]any `json:"constraints,omitempty"`
+    InputsSchema  map[string]any `json:"inputs_schema,omitempty"`
+    OutputsSchema map[string]any `json:"outputs_schema,omitempty"`
+    Metrics       *PlanMetrics   `json:"metrics,omitempty"`
+}
+
+type PlanNode struct {
+    ID     string         `json:"id"`
+    Op     string         `json:"op"` // action/tool identifier
+    Params map[string]any `json:"params,omitempty"`
+    Guards map[string]any `json:"guards,omitempty"` // conditional execution
+}
+
+type PlanEdge struct {
+    From string   `json:"from"`
+    To   string   `json:"to"`
+    Kind EdgeKind `json:"kind"` // data | control
+}
+```
+
+### Lifecycle Rules
+
+1. **Creation:** Extracted during consolidation from episodic tool graphs
+2. **Selection:** Chosen based on intent matching, constraint satisfaction, and metrics
+3. **Versioning:** Multiple versions can coexist; selected by success rate
+4. **Metrics tracking:** Execution count, latency, failure rate updated per run
+5. **Decay:** Very slow decay (default half-life: 180 days)
+
+### Example
+
+```json
+{
+  "id": "plan-setup-go-backend",
+  "type": "plan_graph",
+  "sensitivity": "low",
+  "confidence": 0.85,
+  "salience": 0.75,
+  "payload": {
+    "kind": "plan_graph",
+    "plan_id": "setup_go_backend",
+    "version": "2.1",
+    "intent": "Initialize new Go backend service",
+    "nodes": [
+      {
+        "id": "n1",
+        "op": "init_repo",
+        "params": {"vcs": "git"}
+      },
+      {
+        "id": "n2",
+        "op": "create_go_mod",
+        "params": {"go_version": "1.22"}
+      },
+      {
+        "id": "n3",
+        "op": "scaffold_structure",
+        "params": {"pattern": "clean_architecture"}
+      },
+      {
+        "id": "n4",
+        "op": "setup_ci",
+        "params": {"provider": "github_actions"}
+      }
+    ],
+    "edges": [
+      {"from": "n1", "to": "n2", "kind": "control"},
+      {"from": "n2", "to": "n3", "kind": "control"},
+      {"from": "n3", "to": "n4", "kind": "control"}
+    ],
+    "metrics": {
+      "execution_count": 12,
+      "avg_latency_ms": 4500,
+      "failure_rate": 0.08
+    }
+  }
+}
+```
+
+## Memory Type Selection
+
+When should you use each type?
+
+<CardGroup cols={2}>
+  <Card title="Use Episodic When" icon="clock">
+    - Recording tool invocations
+    - Capturing errors and diagnostics
+    - Logging user interactions
+    - Tracking execution traces
+  </Card>
+  <Card title="Use Working When" icon="list-check">
+    - Tracking multi-step task state
+    - Managing session continuity
+    - Storing in-progress decisions
+    - Coordinating agent activities
+  </Card>
+  <Card title="Use Semantic When" icon="brain">
+    - Storing user preferences
+    - Recording environment facts
+    - Maintaining configuration
+    - Capturing domain knowledge
+  </Card>
+  <Card title="Use Competence When" icon="wrench">
+    - A procedure succeeds repeatedly
+    - Error resolution follows patterns
+    - Tool usage becomes routine
+    - Troubleshooting knowledge emerges
+  </Card>
+</CardGroup>
+
+<Card title="Use Plan Graph When" icon="diagram-project">
+  - Multi-step workflows become standardized
+  - Dependencies between actions are clear
+  - Success metrics can be tracked
+  - Solution structure is reusable
+</Card>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Revision Operations" icon="code-branch" href="/concepts/revision-operations">
+    Learn how to update and manage memory records
+  </Card>
+  <Card title="Decay & Consolidation" icon="clock-rotate-left" href="/concepts/decay-and-consolidation">
+    Understand how memory evolves over time
+  </Card>
+</CardGroup>

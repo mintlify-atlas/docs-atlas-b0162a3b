@@ -1,0 +1,458 @@
+---
+title: 'Storage'
+description: 'Storage backends for persisting memory records'
+---
+
+The `storage` package defines the Store interface that all storage backends must implement. Membrane includes two built-in backends: SQLite and PostgreSQL.
+
+## Store Interface
+
+All storage backends implement the `Store` interface:
+
+```go
+type Store interface {
+    // CRUD operations
+    Create(ctx context.Context, record *schema.MemoryRecord) error
+    Get(ctx context.Context, id string) (*schema.MemoryRecord, error)
+    Update(ctx context.Context, record *schema.MemoryRecord) error
+    Delete(ctx context.Context, id string) error
+
+    // Querying
+    List(ctx context.Context, opts ListOptions) ([]*schema.MemoryRecord, error)
+    ListByType(ctx context.Context, memType schema.MemoryType) ([]*schema.MemoryRecord, error)
+
+    // Specialized operations
+    UpdateSalience(ctx context.Context, id string, salience float64) error
+    AddAuditEntry(ctx context.Context, id string, entry schema.AuditEntry) error
+    AddRelation(ctx context.Context, sourceID string, rel schema.Relation) error
+    GetRelations(ctx context.Context, id string) ([]schema.Relation, error)
+
+    // Transactions
+    Begin(ctx context.Context) (Transaction, error)
+
+    // Lifecycle
+    Close() error
+}
+```
+
+## ListOptions
+
+Filters for the `List` operation:
+
+```go
+type ListOptions struct {
+    Type        schema.MemoryType  // Filter by memory type (empty = no filter)
+    Tags        []string           // Records must have ALL specified tags
+    Scope       string             // Filter by scope (empty = no filter)
+    Sensitivity schema.Sensitivity // Filter by sensitivity (empty = no filter)
+    MinSalience float64            // Salience >= this value (0 = no filter)
+    MaxSalience float64            // Salience <= this value (0 = no filter)
+    Limit       int                // Cap number of results (0 = no limit)
+    Offset      int                // Skip first N records for pagination
+}
+```
+
+**Example:**
+```go
+records, err := store.List(ctx, storage.ListOptions{
+    Type:        schema.MemoryTypeSemantic,
+    Tags:        []string{"preferences", "user"},
+    MinSalience: 0.5,
+    Limit:       20,
+})
+```
+
+## Transaction Interface
+
+```go
+type Transaction interface {
+    // Same CRUD methods as Store
+    Create(ctx context.Context, record *schema.MemoryRecord) error
+    Get(ctx context.Context, id string) (*schema.MemoryRecord, error)
+    Update(ctx context.Context, record *schema.MemoryRecord) error
+    Delete(ctx context.Context, id string) error
+    List(ctx context.Context, opts ListOptions) ([]*schema.MemoryRecord, error)
+    ListByType(ctx context.Context, memType schema.MemoryType) ([]*schema.MemoryRecord, error)
+    UpdateSalience(ctx context.Context, id string, salience float64) error
+    AddAuditEntry(ctx context.Context, id string, entry schema.AuditEntry) error
+    AddRelation(ctx context.Context, sourceID string, rel schema.Relation) error
+    GetRelations(ctx context.Context, id string) ([]schema.Relation, error)
+
+    // Transaction control
+    Commit() error
+    Rollback() error
+}
+```
+
+**Example:**
+```go
+tx, err := store.Begin(ctx)
+if err != nil {
+    return err
+}
+defer tx.Rollback()
+
+if err := tx.Create(ctx, record1); err != nil {
+    return err
+}
+if err := tx.Create(ctx, record2); err != nil {
+    return err
+}
+
+return tx.Commit()
+```
+
+## SQLite Backend
+
+The SQLite backend uses `github.com/mattn/go-sqlite3` with optional SQLCipher encryption.
+
+### Open()
+
+```go
+func Open(dsn string, encryptionKey string) (*SQLiteStore, error)
+```
+
+<ParamField path="dsn" type="string" required>
+  Database file path or `":memory:"` for in-memory database
+</ParamField>
+
+<ParamField path="encryptionKey" type="string">
+  SQLCipher encryption key. Empty string means no encryption.
+</ParamField>
+
+**Example:**
+```go
+import "github.com/GustyCube/membrane/pkg/storage/sqlite"
+
+// Unencrypted database
+store, err := sqlite.Open("./data/membrane.db", "")
+if err != nil {
+    log.Fatal(err)
+}
+defer store.Close()
+```
+
+**Example with encryption:**
+```go
+import (
+    "os"
+    "github.com/GustyCube/membrane/pkg/storage/sqlite"
+)
+
+encKey := os.Getenv("MEMBRANE_ENCRYPTION_KEY")
+store, err := sqlite.Open("./data/membrane.db", encKey)
+if err != nil {
+    log.Fatal(err)
+}
+defer store.Close()
+```
+
+**In-memory database (for testing):**
+```go
+store, err := sqlite.Open(":memory:", "")
+```
+
+### Features
+
+- **SQLCipher encryption** - Full database encryption when encryption key is provided
+- **WAL mode** - Write-Ahead Logging for better concurrency
+- **Foreign keys** - Automatic cascade deletes for related data
+- **Batch operations** - Optimized batch fetching to avoid N+1 queries
+- **Transactions** - Full ACID transaction support
+
+## PostgreSQL Backend
+
+The PostgreSQL backend uses `github.com/jackc/pgx/v5` with pgvector extension for embedding support.
+
+### Open()
+
+```go
+func Open(dsn string, cfg EmbeddingConfig) (*PostgresStore, error)
+```
+
+<ParamField path="dsn" type="string" required>
+  PostgreSQL connection string (e.g., `"postgres://user:pass@localhost/dbname"`)
+</ParamField>
+
+<ParamField path="cfg" type="EmbeddingConfig" required>
+  Embedding configuration for vector storage
+</ParamField>
+
+**EmbeddingConfig:**
+```go
+type EmbeddingConfig struct {
+    Dimensions int    // Vector dimension (default: 1536)
+    Model      string // Embedding model name
+}
+```
+
+**Example:**
+```go
+import (
+    "os"
+    "github.com/GustyCube/membrane/pkg/storage/postgres"
+)
+
+dsn := os.Getenv("MEMBRANE_POSTGRES_DSN")
+store, err := postgres.Open(dsn, postgres.EmbeddingConfig{
+    Dimensions: 1536,
+    Model:      "text-embedding-3-small",
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer store.Close()
+```
+
+### Postgres-Specific Methods
+
+#### StoreTriggerEmbedding()
+
+Stores or updates a trigger embedding for a record.
+
+```go
+func (s *PostgresStore) StoreTriggerEmbedding(
+    ctx context.Context,
+    recordID string,
+    embedding []float32,
+    model string,
+) error
+```
+
+**Example:**
+```go
+embedding := []float32{0.1, 0.2, 0.3, /* ... 1536 dimensions */}
+err := pgStore.StoreTriggerEmbedding(ctx, recordID, embedding, "text-embedding-3-small")
+```
+
+#### GetTriggerEmbedding()
+
+Retrieves the stored embedding for a record.
+
+```go
+func (s *PostgresStore) GetTriggerEmbedding(
+    ctx context.Context,
+    recordID string,
+) ([]float32, error)
+```
+
+#### SearchByEmbedding()
+
+Returns record IDs ordered by cosine distance (nearest neighbors).
+
+```go
+func (s *PostgresStore) SearchByEmbedding(
+    ctx context.Context,
+    query []float32,
+    limit int,
+) ([]string, error)
+```
+
+**Example:**
+```go
+queryEmbedding := []float32{/* ... */}
+ids, err := pgStore.SearchByEmbedding(ctx, queryEmbedding, 10)
+if err != nil {
+    log.Fatal(err)
+}
+
+for _, id := range ids {
+    rec, _ := store.Get(ctx, id)
+    log.Printf("Similar record: %s", rec.ID)
+}
+```
+
+#### ClaimUnextractedEpisodics()
+
+Atomically claims episodic records for semantic extraction.
+
+```go
+func (s *PostgresStore) ClaimUnextractedEpisodics(
+    ctx context.Context,
+    limit int,
+) ([]string, error)
+```
+
+#### MarkEpisodicExtracted()
+
+Marks a claimed episodic record as fully processed.
+
+```go
+func (s *PostgresStore) MarkEpisodicExtracted(
+    ctx context.Context,
+    recordID string,
+    tripleCount int,
+) error
+```
+
+#### FindSemanticExact()
+
+Retrieves a semantic record by exact subject-predicate-object match.
+
+```go
+func (s *PostgresStore) FindSemanticExact(
+    ctx context.Context,
+    subject string,
+    predicate string,
+    object string,
+) (*schema.MemoryRecord, error)
+```
+
+**Example:**
+```go
+rec, err := pgStore.FindSemanticExact(ctx, "user-prefs", "editor", "vim")
+if err != nil {
+    log.Fatal(err)
+}
+if rec != nil {
+    log.Printf("Found existing semantic record: %s", rec.ID)
+}
+```
+
+### Features
+
+- **pgvector extension** - Native vector storage and similarity search
+- **Semantic extraction tracking** - Coordinates LLM-based fact extraction from episodic records
+- **Exact semantic matching** - Efficient subject-predicate-object lookups
+- **Full-text search ready** - Schema supports GIN indexes for text search
+- **Concurrent extraction** - Atomic claim/release mechanism prevents duplicate work
+
+## Error Handling
+
+```go
+var (
+    ErrNotFound      = errors.New("record not found")
+    ErrAlreadyExists = errors.New("record already exists")
+    ErrTxClosed      = errors.New("transaction already closed")
+)
+```
+
+**Example:**
+```go
+import (
+    "errors"
+    "github.com/GustyCube/membrane/pkg/storage"
+)
+
+rec, err := store.Get(ctx, id)
+if errors.Is(err, storage.ErrNotFound) {
+    log.Println("Record not found")
+    return
+}
+if err != nil {
+    log.Fatal(err)
+}
+```
+
+## Complete Example
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "time"
+
+    "github.com/google/uuid"
+    "github.com/GustyCube/membrane/pkg/schema"
+    "github.com/GustyCube/membrane/pkg/storage/sqlite"
+)
+
+func main() {
+    // Open SQLite store
+    store, err := sqlite.Open("./membrane.db", "")
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer store.Close()
+
+    ctx := context.Background()
+
+    // Create a memory record
+    payload := &schema.SemanticPayload{
+        Kind:      "semantic",
+        Subject:   "project-config",
+        Predicate: "build_tool",
+        Object:    "make",
+        Validity: schema.Validity{
+            Mode: schema.ValidityModeGlobal,
+        },
+    }
+
+    rec := schema.NewMemoryRecord(
+        uuid.New().String(),
+        schema.MemoryTypeSemantic,
+        schema.SensitivityLow,
+        payload,
+    )
+    rec.Tags = []string{"config", "build"}
+
+    // Store it
+    if err := store.Create(ctx, rec); err != nil {
+        log.Fatal(err)
+    }
+    log.Printf("Created record: %s", rec.ID)
+
+    // Query by tags
+    records, err := store.List(ctx, storage.ListOptions{
+        Tags:  []string{"config"},
+        Limit: 10,
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
+    log.Printf("Found %d records with 'config' tag", len(records))
+
+    // Update salience
+    if err := store.UpdateSalience(ctx, rec.ID, 0.9); err != nil {
+        log.Fatal(err)
+    }
+
+    // Add audit entry
+    if err := store.AddAuditEntry(ctx, rec.ID, schema.AuditEntry{
+        Action:    schema.AuditActionReinforce,
+        Actor:     "agent-1",
+        Timestamp: time.Now(),
+        Rationale: "Used successfully in recent build",
+    }); err != nil {
+        log.Fatal(err)
+    }
+
+    // Retrieve updated record
+    updated, err := store.Get(ctx, rec.ID)
+    if err != nil {
+        log.Fatal(err)
+    }
+    log.Printf("Updated salience: %.2f", updated.Salience)
+    log.Printf("Audit log entries: %d", len(updated.AuditLog))
+}
+```
+
+## Choosing a Backend
+
+<Card title="SQLite" icon="database">
+**Best for:**
+- Single-server deployments
+- Embedded applications
+- Development and testing
+- File-based portability
+- Encryption at rest (via SQLCipher)
+
+**Limitations:**
+- No vector similarity search
+- Single-writer concurrency
+</Card>
+
+<Card title="PostgreSQL" icon="server">
+**Best for:**
+- Multi-server deployments
+- High concurrency workloads
+- Vector similarity search (pgvector)
+- Semantic extraction pipelines
+- Production deployments
+
+**Requirements:**
+- PostgreSQL 12+ with pgvector extension
+- Network access to database server
+</Card>

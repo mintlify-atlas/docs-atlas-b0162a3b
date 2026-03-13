@@ -1,0 +1,466 @@
+---
+title: LLM Integration
+description: Integrate Membrane with LLM prompts for memory-augmented agents
+---
+
+Membrane is designed to sit between your orchestration layer and LLM calls. It provides memory context for prompts and learns from outcomes through reinforcement loops.
+
+## Integration Pattern
+
+The canonical integration flow:
+
+<Steps>
+  <Step title="Ingest observations">
+    Capture tool calls, user inputs, and events during execution
+  </Step>
+  <Step title="Retrieve memory">
+    Query relevant memory for the next task using trust-gated retrieval
+  </Step>
+  <Step title="Build prompt">
+    Inject retrieved memory records into the LLM prompt as context
+  </Step>
+  <Step title="Reinforce">
+    After execution, reinforce useful records and penalize unhelpful ones
+  </Step>
+</Steps>
+
+## TypeScript Example
+
+Here's a complete example using OpenAI (or any OpenAI-compatible provider):
+
+```typescript
+import OpenAI from "openai";
+import { MembraneClient, Sensitivity } from "@gustycube/membrane";
+
+const memory = new MembraneClient("localhost:9090", { 
+  apiKey: process.env.MEMBRANE_API_KEY 
+});
+
+const llm = new OpenAI({
+  apiKey: process.env.LLM_API_KEY,
+  // OpenAI-compatible providers are supported:
+  // baseURL: "https://openrouter.ai/api/v1",
+});
+
+// Step 1: Retrieve relevant memory
+const records = await memory.retrieve("plan a safe database migration", {
+  trust: {
+    max_sensitivity: Sensitivity.MEDIUM,
+    authenticated: true,
+    actor_id: "planner-agent",
+    scopes: ["project-acme"],
+  },
+  memoryTypes: ["semantic", "competence", "working"],
+  limit: 12,
+});
+
+// Step 2: Build prompt with memory context
+const context = records.map((r) => JSON.stringify(r)).join("\n");
+
+const completion = await llm.chat.completions.create({
+  model: "gpt-5.2",
+  messages: [
+    { 
+      role: "system", 
+      content: "Use memory context as evidence. Cite record IDs when referencing past knowledge." 
+    },
+    { 
+      role: "user", 
+      content: `Task: plan database migration\n\nMemory Context:\n${context}` 
+    },
+  ],
+});
+
+const answer = completion.choices[0]?.message?.content ?? "";
+
+// Step 3: Ingest the LLM's plan as episodic memory
+const planRecord = await memory.ingestEvent("llm_plan", "migration-task-42", {
+  source: "planner-agent",
+  summary: answer.slice(0, 500),
+  tags: ["llm", "plan", "migration"],
+  scope: "project-acme",
+});
+
+// Step 4: Reinforce if the plan was successful
+await memory.reinforce(planRecord.id, "planner-agent", "plan used successfully");
+
+memory.close();
+```
+
+## Python Example
+
+Same pattern in Python:
+
+```python
+from openai import OpenAI
+from membrane import MembraneClient, Sensitivity, TrustContext
+
+memory = MembraneClient("localhost:9090", api_key=os.getenv("MEMBRANE_API_KEY"))
+llm = OpenAI(api_key=os.getenv("LLM_API_KEY"))
+
+# Retrieve relevant memory
+records = memory.retrieve(
+    task_descriptor="plan a safe database migration",
+    trust=TrustContext(
+        max_sensitivity=Sensitivity.MEDIUM,
+        authenticated=True,
+        actor_id="planner-agent",
+        scopes=["project-acme"],
+    ),
+    memory_types=["semantic", "competence", "working"],
+    limit=12,
+)
+
+# Build prompt with context
+context = "\n".join(json.dumps(r.to_dict()) for r in records)
+
+completion = llm.chat.completions.create(
+    model="gpt-5.2",
+    messages=[
+        {
+            "role": "system",
+            "content": "Use memory context as evidence. Cite record IDs.",
+        },
+        {
+            "role": "user",
+            "content": f"Task: plan migration\n\nMemory:\n{context}",
+        },
+    ],
+)
+
+answer = completion.choices[0].message.content
+
+# Ingest and reinforce
+plan_record = memory.ingest_event(
+    source="planner-agent",
+    event_kind="llm_plan",
+    ref="migration-task-42",
+    summary=answer[:500],
+    tags=["llm", "plan", "migration"],
+)
+
+memory.reinforce(plan_record.id, "planner-agent", "plan used successfully")
+```
+
+## Go (Embedded) Example
+
+Using Membrane as an embedded library:
+
+```go
+package main
+
+import (
+    "context"
+    "encoding/json"
+    "fmt"
+    "strings"
+
+    "github.com/GustyCube/membrane/pkg/ingestion"
+    "github.com/GustyCube/membrane/pkg/membrane"
+    "github.com/GustyCube/membrane/pkg/retrieval"
+    "github.com/GustyCube/membrane/pkg/schema"
+)
+
+func main() {
+    cfg := membrane.DefaultConfig()
+    cfg.DBPath = "agent-memory.db"
+
+    m, _ := membrane.New(cfg)
+    defer m.Stop()
+
+    ctx := context.Background()
+    m.Start(ctx)
+
+    // Retrieve relevant memory
+    resp, _ := m.Retrieve(ctx, &retrieval.RetrieveRequest{
+        TaskDescriptor: "plan database migration",
+        Trust: &retrieval.TrustContext{
+            MaxSensitivity: schema.SensitivityMedium,
+            Authenticated:  true,
+            ActorID:        "planner-agent",
+            Scopes:         []string{"project-acme"},
+        },
+        MemoryTypes: []schema.MemoryType{
+            schema.MemoryTypeSemantic,
+            schema.MemoryTypeCompetence,
+            schema.MemoryTypeWorking,
+        },
+        Limit: 12,
+    })
+
+    // Build context string
+    var contextParts []string
+    for _, rec := range resp.Records {
+        data, _ := json.Marshal(rec)
+        contextParts = append(contextParts, string(data))
+    }
+    context := strings.Join(contextParts, "\n")
+
+    // Call LLM (pseudo-code)
+    prompt := fmt.Sprintf("Task: plan migration\n\nMemory:\n%s", context)
+    answer := callLLM(prompt)
+
+    // Ingest LLM output
+    planRec, _ := m.IngestEvent(ctx, ingestion.IngestEventRequest{
+        Source:    "planner-agent",
+        EventKind: "llm_plan",
+        Ref:       "migration-task-42",
+        Summary:   answer[:500],
+        Tags:      []string{"llm", "plan", "migration"},
+    })
+
+    // Reinforce if successful
+    m.Reinforce(ctx, planRec.ID, "planner-agent", "plan used successfully")
+}
+
+func callLLM(prompt string) string {
+    // Your LLM call here
+    return "mock response"
+}
+```
+
+## Memory-Aware Prompting
+
+### Citing Record IDs
+
+Instruct the model to cite record IDs when using memory:
+
+```typescript
+const systemPrompt = `You are a helpful assistant with access to a memory substrate.
+When you reference information from memory, cite the record ID like this: [record:abc-123].
+This helps track which memories were useful.`;
+```
+
+### Parsing Citations
+
+Extract citations from the response to reinforce:
+
+```typescript
+function extractRecordIDs(text: string): string[] {
+  const pattern = /\[record:([a-f0-9\-]+)\]/g;
+  const matches = [...text.matchAll(pattern)];
+  return matches.map(m => m[1]);
+}
+
+const citedRecords = extractRecordIDs(answer);
+for (const id of citedRecords) {
+  await memory.reinforce(id, "agent", "cited in successful response");
+}
+```
+
+## Reinforcement Loop
+
+### After Success
+
+```typescript
+if (taskSucceeded) {
+  // Boost salience of all retrieved records
+  for (const record of records) {
+    await memory.reinforce(
+      record.id, 
+      "agent", 
+      "contributed to successful task completion"
+    );
+  }
+}
+```
+
+### After Failure
+
+```typescript
+if (taskFailed) {
+  // Penalize records that led to failure
+  for (const record of records) {
+    await memory.penalize(
+      record.id, 
+      0.2,  // reduce salience by 0.2
+      "agent", 
+      "did not help solve the task"
+    );
+  }
+}
+```
+
+## Selective Memory Types
+
+Retrieve different memory types for different tasks:
+
+### Planning Tasks
+
+```typescript
+const planningMemory = await memory.retrieve("plan feature implementation", {
+  memoryTypes: ["competence", "plan_graph", "semantic"],
+  limit: 20,
+});
+```
+
+### Debugging Tasks
+
+```typescript
+const debuggingMemory = await memory.retrieve("fix build error", {
+  memoryTypes: ["episodic", "competence"],
+  minSalience: 0.5,
+  limit: 15,
+});
+```
+
+### Preference Queries
+
+```typescript
+const preferences = await memory.retrieve("user preferences", {
+  memoryTypes: ["semantic"],
+  limit: 10,
+});
+```
+
+## Trust-Gated Retrieval
+
+Control what the LLM can access based on sensitivity:
+
+<Tabs>
+  <Tab title="Low Trust Context">
+    ```typescript
+    const publicMemory = await memory.retrieve("general knowledge", {
+      trust: {
+        max_sensitivity: Sensitivity.LOW,
+        authenticated: false,
+        actor_id: "public-bot",
+      },
+    });
+    ```
+  </Tab>
+
+  <Tab title="Medium Trust Context">
+    ```typescript
+    const teamMemory = await memory.retrieve("project context", {
+      trust: {
+        max_sensitivity: Sensitivity.MEDIUM,
+        authenticated: true,
+        actor_id: "team-agent",
+        scopes: ["project-backend"],
+      },
+    });
+    ```
+  </Tab>
+
+  <Tab title="High Trust Context">
+    ```typescript
+    const sensitiveMemory = await memory.retrieve("security audit", {
+      trust: {
+        max_sensitivity: Sensitivity.HIGH,
+        authenticated: true,
+        actor_id: "admin-agent",
+        scopes: ["security", "infra"],
+      },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## Background Semantic Extraction
+
+When Postgres plus an LLM endpoint are configured, Membrane can extract structured semantic facts from episodic traces during consolidation:
+
+```yaml
+# config.yaml
+backend: "postgres"
+postgres_dsn: "postgres://membrane:password@localhost/membrane"
+
+# Enable LLM-backed semantic extraction
+llm_endpoint: "https://api.openai.com/v1/chat/completions"
+llm_model: "gpt-5-mini"
+llm_api_key: ""  # or set MEMBRANE_LLM_API_KEY
+
+consolidation_interval: "6h"
+```
+
+This runs asynchronously during consolidation and automatically creates semantic records from episodic observations.
+
+## Token Budget Management
+
+Limit context size to fit model windows:
+
+```typescript
+function buildContext(records: MemoryRecord[], maxTokens: number): string {
+  let context = "";
+  let tokenCount = 0;
+
+  for (const record of records) {
+    const recordJSON = JSON.stringify(record);
+    const estimatedTokens = Math.ceil(recordJSON.length / 4);
+    
+    if (tokenCount + estimatedTokens > maxTokens) {
+      break;
+    }
+    
+    context += recordJSON + "\n";
+    tokenCount += estimatedTokens;
+  }
+
+  return context;
+}
+
+const context = buildContext(records, 4000);
+```
+
+## Multi-Turn Conversations
+
+For conversational agents, track working memory across turns:
+
+```typescript
+const sessionID = "session-001";
+
+// At the start of each turn, retrieve working memory
+const workingMemory = await memory.retrieve("current conversation", {
+  memoryTypes: ["working"],
+  trust: { max_sensitivity: Sensitivity.MEDIUM, authenticated: true },
+});
+
+// Filter to current session
+const sessionState = workingMemory.find(
+  r => r.payload.thread_id === sessionID
+);
+
+// After each turn, update working memory
+await memory.ingestWorkingState({
+  source: "chatbot",
+  thread_id: sessionID,
+  state: "executing",
+  next_actions: ["respond to user"],
+  context_summary: "Discussing database migration strategy",
+});
+```
+
+## Performance Tips
+
+<CardGroup cols={2}>
+  <Card title="Cache Embeddings" icon="database">
+    Use Postgres + pgvector backend for embedding-backed retrieval
+  </Card>
+  <Card title="Limit Results" icon="filter">
+    Set `limit` to avoid large context windows
+  </Card>
+  <Card title="Filter by Salience" icon="star">
+    Use `minSalience` to exclude low-quality records
+  </Card>
+  <Card title="Scope Retrieval" icon="sitemap">
+    Use scopes to partition memory by project/user
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Embedded Usage" icon="code" href="/guides/embedded-usage">
+    Use Membrane as a Go library
+  </Card>
+  <Card title="Observability" icon="chart-line" href="/guides/observability">
+    Monitor retrieval usefulness and competence metrics
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/guides/configuration">
+    Configure LLM-backed semantic extraction
+  </Card>
+  <Card title="TypeScript SDK" icon="js" href="/clients/typescript">
+    Full TypeScript API reference
+  </Card>
+</CardGroup>

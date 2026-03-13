@@ -1,0 +1,373 @@
+---
+title: Metrics API
+description: Retrieve observability snapshots for memory growth, retrieval usefulness, and system health
+---
+
+## Overview
+
+The metrics API provides a point-in-time snapshot of memory substrate health and behavior. It exposes quantitative observability per RFC 15.10, including:
+
+- **Memory growth rate** — Fraction of records created in the last 24 hours
+- **Retrieval usefulness** — Ratio of reinforce actions to total audit entries
+- **Competence success rate** — Average success rate across competence records
+- **Plan reuse frequency** — Average execution count across plan graph records
+- **Revision rate** — Fraction of audit entries that are revisions
+
+<Card title="No Authentication Required" icon="unlock">
+  The `GetMetrics` endpoint does not require authentication and can be called anonymously for system monitoring.
+</Card>
+
+---
+
+## GetMetrics
+
+Retrieve a comprehensive metrics snapshot from the memory substrate.
+
+<CodeGroup>
+```typescript TypeScript
+const metrics = await client.getMetrics();
+
+console.log(`Total records: ${metrics.total_records}`);
+console.log(`Memory growth rate: ${(metrics.memory_growth_rate * 100).toFixed(1)}%`);
+console.log(`Retrieval usefulness: ${(metrics.retrieval_usefulness * 100).toFixed(1)}%`);
+console.log(`Competence success rate: ${(metrics.competence_success_rate * 100).toFixed(1)}%`);
+```
+
+```python Python
+metrics = client.get_metrics()
+
+print(f"Total records: {metrics.total_records}")
+print(f"Memory growth rate: {metrics.memory_growth_rate * 100:.1f}%")
+print(f"Retrieval usefulness: {metrics.retrieval_usefulness * 100:.1f}%")
+print(f"Competence success rate: {metrics.competence_success_rate * 100:.1f}%")
+```
+
+```go Go
+resp, err := client.GetMetrics(ctx, &membranev1.GetMetricsRequest{})
+if err != nil {
+    log.Fatal(err)
+}
+
+var snapshot metrics.Snapshot
+if err := json.Unmarshal(resp.Snapshot, &snapshot); err != nil {
+    log.Fatal(err)
+}
+
+fmt.Printf("Total records: %d\n", snapshot.TotalRecords)
+fmt.Printf("Memory growth rate: %.1f%%\n", snapshot.MemoryGrowthRate*100)
+```
+</CodeGroup>
+
+### Request Parameters
+
+No parameters required.
+
+### Response
+
+The response contains a JSON-encoded `Snapshot` object with the following fields:
+
+<ResponseField name="collected_at" type="string (RFC 3339)">
+  Timestamp when the snapshot was collected
+</ResponseField>
+
+<ResponseField name="total_records" type="number">
+  Total number of memory records in the substrate
+</ResponseField>
+
+<ResponseField name="records_by_type" type="object">
+  Breakdown of records by memory type
+  
+  ```json
+  {
+    "episodic": 80,
+    "semantic": 35,
+    "competence": 15,
+    "plan_graph": 7,
+    "working": 5
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="avg_salience" type="number">
+  Average salience across all records (range: [0, 1])
+</ResponseField>
+
+<ResponseField name="avg_confidence" type="number">
+  Average confidence across all records (range: [0, 1])
+</ResponseField>
+
+<ResponseField name="salience_distribution" type="object">
+  Distribution of records across salience buckets
+  
+  ```json
+  {
+    "0.0-0.2": 12,
+    "0.2-0.4": 18,
+    "0.4-0.6": 30,
+    "0.6-0.8": 45,
+    "0.8-1.0": 37
+  }
+  ```
+</ResponseField>
+
+<ResponseField name="active_records" type="number">
+  Number of records with salience > 0
+</ResponseField>
+
+<ResponseField name="pinned_records" type="number">
+  Number of records with `lifecycle.pinned = true` (immune to decay and pruning)
+</ResponseField>
+
+<ResponseField name="total_audit_entries" type="number">
+  Total number of audit entries across all records
+</ResponseField>
+
+### Behavioral Metrics (RFC 15.10)
+
+<ResponseField name="memory_growth_rate" type="number">
+  Fraction of records created in the last 24 hours. Range: [0, 1]
+  
+  **Interpretation**:
+  - **0.0 - 0.05**: Low growth, mature system
+  - **0.05 - 0.20**: Moderate growth, active learning
+  - **0.20+**: High growth, rapid ingestion or consolidation phase
+</ResponseField>
+
+<ResponseField name="retrieval_usefulness" type="number">
+  Ratio of `reinforce` actions to total audit entries. Range: [0, 1]
+  
+  **Interpretation**:
+  - **0.0 - 0.10**: Poor retrieval quality, most records unused
+  - **0.10 - 0.30**: Moderate usefulness, room for improvement
+  - **0.30+**: High usefulness, good retrieval relevance
+</ResponseField>
+
+<ResponseField name="competence_success_rate" type="number">
+  Average success rate across all competence records. Range: [0, 1]
+  
+  **Interpretation**:
+  - **0.0 - 0.50**: Low competence quality, procedures need refinement
+  - **0.50 - 0.70**: Moderate quality, acceptable but improvable
+  - **0.70+**: High quality, reliable procedures
+</ResponseField>
+
+<ResponseField name="plan_reuse_frequency" type="number">
+  Average execution count across all plan graph records
+  
+  **Interpretation**:
+  - **0.0 - 1.0**: Plans rarely reused, single-use workflows
+  - **1.0 - 5.0**: Moderate reuse, some recurring patterns
+  - **5.0+**: High reuse, well-established workflows
+</ResponseField>
+
+<ResponseField name="revision_rate" type="number">
+  Fraction of audit entries that are revisions (supersede, fork, merge). Range: [0, 1]
+  
+  **Interpretation**:
+  - **0.0 - 0.05**: Low revision activity, mostly ingestion
+  - **0.05 - 0.15**: Moderate revision, healthy knowledge refinement
+  - **0.15+**: High revision, active knowledge curation or consolidation phase
+</ResponseField>
+
+---
+
+## Example Response
+
+```json
+{
+  "collected_at": "2026-03-13T10:30:00Z",
+  "total_records": 142,
+  "records_by_type": {
+    "episodic": 80,
+    "semantic": 35,
+    "competence": 15,
+    "plan_graph": 7,
+    "working": 5
+  },
+  "avg_salience": 0.62,
+  "avg_confidence": 0.78,
+  "salience_distribution": {
+    "0.0-0.2": 12,
+    "0.2-0.4": 18,
+    "0.4-0.6": 30,
+    "0.6-0.8": 45,
+    "0.8-1.0": 37
+  },
+  "active_records": 130,
+  "pinned_records": 3,
+  "total_audit_entries": 890,
+  "memory_growth_rate": 0.15,
+  "retrieval_usefulness": 0.42,
+  "competence_success_rate": 0.85,
+  "plan_reuse_frequency": 2.3,
+  "revision_rate": 0.08
+}
+```
+
+---
+
+## Monitoring and Alerting
+
+Use metrics snapshots for monitoring and alerting:
+
+### Prometheus-style Queries
+
+If you export metrics to Prometheus, you can define alerts:
+
+```yaml
+groups:
+  - name: membrane
+    rules:
+      - alert: LowRetrievalUsefulness
+        expr: membrane_retrieval_usefulness < 0.10
+        for: 1h
+        annotations:
+          summary: "Membrane retrieval usefulness is below 10%"
+          description: "Most retrieved records are not being reinforced, indicating poor retrieval quality"
+
+      - alert: HighMemoryGrowth
+        expr: membrane_memory_growth_rate > 0.30
+        for: 30m
+        annotations:
+          summary: "Membrane memory growth exceeds 30% in 24h"
+          description: "Rapid memory growth detected, may need pruning or consolidation"
+
+      - alert: LowCompetenceSuccessRate
+        expr: membrane_competence_success_rate < 0.50
+        for: 2h
+        annotations:
+          summary: "Competence success rate is below 50%"
+          description: "Stored procedures are failing frequently, need review and refinement"
+```
+
+### Custom Monitoring Script
+
+```python
+import time
+from membrane import MembraneClient
+
+client = MembraneClient("localhost:9090")
+
+def check_health():
+    metrics = client.get_metrics()
+    
+    warnings = []
+    
+    if metrics.retrieval_usefulness < 0.10:
+        warnings.append(f"Low retrieval usefulness: {metrics.retrieval_usefulness:.2%}")
+    
+    if metrics.competence_success_rate < 0.50:
+        warnings.append(f"Low competence success rate: {metrics.competence_success_rate:.2%}")
+    
+    if metrics.memory_growth_rate > 0.30:
+        warnings.append(f"High memory growth: {metrics.memory_growth_rate:.2%}")
+    
+    if metrics.avg_salience < 0.30:
+        warnings.append(f"Low average salience: {metrics.avg_salience:.2f} (consider pruning)")
+    
+    if warnings:
+        print("\n".join(warnings))
+    else:
+        print("All metrics healthy")
+
+while True:
+    check_health()
+    time.sleep(300)  # Check every 5 minutes
+```
+
+---
+
+## Metric Interpretation Guide
+
+### Memory Growth Rate
+
+<Expandable title="Understanding memory growth patterns">
+  **Low growth (0.0 - 0.05)**:
+  - System is mature, mostly retrieving existing knowledge
+  - Consider if ingestion pipelines are functioning correctly
+  - Normal for production systems after initial learning phase
+
+  **Moderate growth (0.05 - 0.20)**:
+  - Active learning and consolidation happening
+  - Healthy balance between new ingestion and existing knowledge
+  - Typical for systems with regular new tasks
+
+  **High growth (0.20+)**:
+  - Rapid ingestion phase, initial setup, or consolidation burst
+  - Monitor for storage usage and consider pruning policies
+  - May indicate inefficient consolidation (too many episodic records not being consolidated)
+</Expandable>
+
+### Retrieval Usefulness
+
+<Expandable title="Understanding retrieval quality">
+  **Low usefulness (0.0 - 0.10)**:
+  - Records being retrieved but rarely marked as useful via `reinforce`
+  - May indicate poor embedding quality or retrieval algorithms
+  - Check if trust filters are too restrictive
+  - Review salience thresholds and memory type filters
+
+  **Moderate usefulness (0.10 - 0.30)**:
+  - Some records useful, but many retrieved records unused
+  - Consider tuning applicability thresholds
+  - Review if reinforcement is being called appropriately
+
+  **High usefulness (0.30+)**:
+  - Good retrieval quality, records are relevant to tasks
+  - Indicates well-tuned retrieval and healthy memory substrate
+</Expandable>
+
+### Competence Success Rate
+
+<Expandable title="Understanding procedural knowledge quality">
+  **Low success rate (0.0 - 0.50)**:
+  - Stored procedures are failing frequently
+  - Review competence extraction and consolidation logic
+  - May need manual curation of competence records
+  - Consider retracting low-performing competence records
+
+  **Moderate success rate (0.50 - 0.70)**:
+  - Procedures work but have room for improvement
+  - Normal for exploratory or rapidly changing domains
+  - Monitor for failure patterns and update procedures
+
+  **High success rate (0.70+)**:
+  - Reliable procedures, good procedural knowledge
+  - Indicates effective competence learning and consolidation
+</Expandable>
+
+### Plan Reuse Frequency
+
+<Expandable title="Understanding workflow patterns">
+  **Low reuse (0.0 - 1.0)**:
+  - Plans are single-use, no recurring workflows
+  - May indicate exploratory phase or highly varied tasks
+  - Consider if plan graph extraction is capturing reusable patterns
+
+  **Moderate reuse (1.0 - 5.0)**:
+  - Some recurring patterns identified
+  - Normal for systems with mixed routine and novel tasks
+
+  **High reuse (5.0+)**:
+  - Well-established workflows being reused frequently
+  - Indicates good plan graph extraction and applicability scoring
+</Expandable>
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Ingestion API" icon="download" href="/api/ingestion">
+    Ingest events to grow memory substrate
+  </Card>
+  <Card title="Retrieval API" icon="search" href="/api/retrieval">
+    Retrieve and reinforce useful records
+  </Card>
+  <Card title="Revision API" icon="rotate" href="/api/revision">
+    Refine knowledge with supersede and merge
+  </Card>
+  <Card title="Configuration" icon="gear" href="/guides/configuration">
+    Configure decay intervals and consolidation
+  </Card>
+</CardGroup>

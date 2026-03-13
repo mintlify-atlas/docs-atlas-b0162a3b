@@ -1,0 +1,459 @@
+---
+title: TypeScript Client
+description: TypeScript/Node SDK for the Membrane memory substrate
+---
+
+The TypeScript client provides a fully-typed interface for communicating with the Membrane daemon over gRPC.
+
+## Installation
+
+Install the client from npm:
+
+```bash
+npm install @gustycube/membrane
+```
+
+**Requirements:**
+- Node.js 20+
+- A running Membrane daemon (default: `localhost:9090`)
+
+## Quick Start
+
+```typescript
+import { MembraneClient, Sensitivity } from "@gustycube/membrane";
+
+const client = new MembraneClient("localhost:9090", {
+  apiKey: "your-api-key"
+});
+
+const record = await client.ingestEvent("file_edit", "src/main.ts", {
+  summary: "Refactored auth middleware",
+  sensitivity: Sensitivity.LOW,
+  tags: ["auth", "typescript"]
+});
+
+const records = await client.retrieve("debug auth", {
+  trust: {
+    max_sensitivity: Sensitivity.MEDIUM,
+    authenticated: true,
+    actor_id: "agent-1",
+    scopes: []
+  },
+  limit: 10
+});
+
+console.log(record.id, records.length);
+client.close();
+```
+
+## API Reference
+
+### Constructor
+
+<ParamField path="endpoint" type="string" required>
+  The Membrane daemon address (e.g., `localhost:9090`)
+</ParamField>
+
+<ParamField path="options" type="object">
+  Connection options:
+  - `apiKey`: Bearer token for authentication
+  - `tls`: Enable TLS transport (default: `false`)
+  - `tlsCaCertPath`: Path to custom CA certificate
+  - `timeoutMs`: Request timeout in milliseconds (default: varies by operation)
+</ParamField>
+
+### Ingestion Methods
+
+Ingest events and observations into Membrane's memory substrate.
+
+<Tabs>
+  <Tab title="ingestEvent">
+    ```typescript
+    await client.ingestEvent(
+      eventKind: string,
+      ref: string,
+      options?: {
+        summary?: string;
+        sensitivity?: Sensitivity;
+        source?: string;
+        tags?: string[];
+      }
+    ): Promise<MemoryRecord>
+    ```
+    
+    Ingest a raw event into episodic memory.
+    
+    **Parameters:**
+    - `eventKind`: Type of event (e.g., `"file_edit"`, `"user_action"`)
+    - `ref`: Unique reference identifier
+    - `options.summary`: Human-readable event description
+    - `options.sensitivity`: Access control level (`Sensitivity.LOW`, etc.)
+    - `options.source`: Origin identifier
+    - `options.tags`: Searchable tags
+  </Tab>
+  
+  <Tab title="ingestToolOutput">
+    ```typescript
+    await client.ingestToolOutput(
+      toolName: string,
+      options?: {
+        args?: Record<string, unknown>;
+        result?: unknown;
+        sensitivity?: Sensitivity;
+        source?: string;
+        tags?: string[];
+      }
+    ): Promise<MemoryRecord>
+    ```
+    
+    Ingest tool invocation results into competence memory.
+  </Tab>
+  
+  <Tab title="ingestObservation">
+    ```typescript
+    await client.ingestObservation(
+      subject: string,
+      predicate: string,
+      obj: unknown,
+      options?: {
+        sensitivity?: Sensitivity;
+        source?: string;
+        tags?: string[];
+      }
+    ): Promise<MemoryRecord>
+    ```
+    
+    Ingest a semantic triple (subject-predicate-object).
+  </Tab>
+  
+  <Tab title="ingestOutcome">
+    ```typescript
+    await client.ingestOutcome(
+      targetRecordId: string,
+      outcomeStatus: OutcomeStatus,
+      options?: {
+        evidence?: unknown;
+        actor?: string;
+        rationale?: string;
+      }
+    ): Promise<MemoryRecord>
+    ```
+    
+    Attach an outcome to an existing memory record.
+  </Tab>
+  
+  <Tab title="ingestWorkingState">
+    ```typescript
+    await client.ingestWorkingState(
+      threadId: string,
+      state: unknown,
+      options?: {
+        sensitivity?: Sensitivity;
+        source?: string;
+        tags?: string[];
+      }
+    ): Promise<MemoryRecord>
+    ```
+    
+    Ingest a working memory snapshot for multi-turn tasks.
+  </Tab>
+</Tabs>
+
+### Retrieval Methods
+
+Retrieve memories relevant to a task or query.
+
+<Tabs>
+  <Tab title="retrieve">
+    ```typescript
+    await client.retrieve(
+      taskDescriptor: string,
+      options?: RetrieveOptions
+    ): Promise<MemoryRecord[]>
+    ```
+    
+    Retrieve memories relevant to a task. Returns only records (backward-compatible helper).
+    
+    **RetrieveOptions:**
+    - `trust`: Trust context for access control
+    - `limit`: Maximum number of records to return
+    - `memoryTypes`: Filter by memory types (`["episodic", "semantic", ...]`)
+    - `minSalience`: Minimum salience threshold (0.0-1.0)
+  </Tab>
+  
+  <Tab title="retrieveWithSelection">
+    ```typescript
+    await client.retrieveWithSelection(
+      taskDescriptor: string,
+      options?: RetrieveOptions
+    ): Promise<{ records: MemoryRecord[]; selection?: SelectionResult }>
+    ```
+    
+    Retrieve memories plus optional selector metadata (confidence, needs_more flag).
+  </Tab>
+  
+  <Tab title="retrieveById">
+    ```typescript
+    await client.retrieveById(
+      recordId: string,
+      trust?: TrustContext
+    ): Promise<MemoryRecord>
+    ```
+    
+    Retrieve a single memory record by ID.
+  </Tab>
+</Tabs>
+
+### Revision Methods
+
+Update, fork, or retract existing memories.
+
+<CodeGroup>
+```typescript supersede
+await client.supersede(
+  oldId: string,
+  newRecord: Partial<MemoryRecord>,
+  actor: string,
+  rationale: string
+): Promise<MemoryRecord>
+```
+
+```typescript fork
+await client.fork(
+  sourceId: string,
+  forkedRecord: Partial<MemoryRecord>,
+  actor: string,
+  rationale: string
+): Promise<MemoryRecord>
+```
+
+```typescript retract
+await client.retract(
+  recordId: string,
+  actor: string,
+  rationale: string
+): Promise<void>
+```
+
+```typescript merge
+await client.merge(
+  recordIds: string[],
+  mergedRecord: Partial<MemoryRecord>,
+  actor: string,
+  rationale: string
+): Promise<MemoryRecord>
+```
+
+```typescript contest
+await client.contest(
+  recordId: string,
+  contestingRef: string,
+  actor: string,
+  rationale: string
+): Promise<void>
+```
+</CodeGroup>
+
+### Reinforcement Methods
+
+Adjust memory salience based on utility.
+
+<CodeGroup>
+```typescript reinforce
+await client.reinforce(
+  recordId: string,
+  actor: string,
+  rationale: string
+): Promise<void>
+```
+
+```typescript penalize
+await client.penalize(
+  recordId: string,
+  amount: number,
+  actor: string,
+  rationale: string
+): Promise<void>
+```
+</CodeGroup>
+
+### Metrics
+
+```typescript
+const metrics = await client.getMetrics();
+```
+
+Get a snapshot of daemon metrics (record counts, memory usage, etc.).
+
+## Types and Enums
+
+### Sensitivity Levels
+
+```typescript
+enum Sensitivity {
+  PUBLIC = "public",
+  LOW = "low",
+  MEDIUM = "medium",
+  HIGH = "high",
+  HYPER = "hyper"
+}
+```
+
+### Memory Types
+
+```typescript
+enum MemoryType {
+  EPISODIC = "episodic",
+  WORKING = "working",
+  SEMANTIC = "semantic",
+  COMPETENCE = "competence",
+  PLAN_GRAPH = "plan_graph"
+}
+```
+
+### TrustContext
+
+```typescript
+interface TrustContext {
+  max_sensitivity: Sensitivity;
+  authenticated: boolean;
+  actor_id: string;
+  scopes: string[];
+}
+```
+
+### MemoryRecord
+
+```typescript
+interface MemoryRecord {
+  id: string;
+  type: MemoryType;
+  sensitivity: Sensitivity;
+  confidence: number;
+  salience: number;
+  scope?: string;
+  tags?: string[];
+  created_at?: string;
+  updated_at?: string;
+  lifecycle?: Lifecycle;
+  provenance?: Provenance;
+  relations?: Relation[];
+  payload?: unknown;
+  audit_log?: AuditEntry[];
+}
+```
+
+## TLS and Authentication
+
+Connect to a TLS-secured Membrane instance:
+
+```typescript
+const client = new MembraneClient("membrane.example.com:443", {
+  tls: true,
+  tlsCaCertPath: "/path/to/ca.pem",
+  apiKey: "your-api-key",
+  timeoutMs: 10_000
+});
+```
+
+<ParamField path="tls" type="boolean">
+  Enable TLS transport encryption
+</ParamField>
+
+<ParamField path="tlsCaCertPath" type="string">
+  Path to custom CA certificate (optional)
+</ParamField>
+
+<ParamField path="apiKey" type="string">
+  Bearer token for authentication
+</ParamField>
+
+## Error Handling
+
+Failed RPCs reject with `MembraneError`, which exposes:
+
+```typescript
+interface MembraneError extends Error {
+  code?: number;           // gRPC status code
+  codeName?: string;       // e.g., "UNAUTHENTICATED"
+  details?: string;        // gRPC details string
+  metadata?: Record<string, string[]>; // Response metadata
+}
+```
+
+**Example:**
+
+```typescript
+try {
+  await client.retrieve("sensitive query", {
+    trust: { max_sensitivity: Sensitivity.LOW, authenticated: false }
+  });
+} catch (err) {
+  if (err.codeName === "PERMISSION_DENIED") {
+    console.error("Insufficient permissions:", err.details);
+  }
+}
+```
+
+## LLM Integration Pattern
+
+Common workflow: ingest execution traces, retrieve relevant memories, pass context to your model.
+
+```typescript
+import OpenAI from "openai";
+import { MembraneClient, Sensitivity } from "@gustycube/membrane";
+
+const memory = new MembraneClient("localhost:9090", {
+  apiKey: process.env.MEMBRANE_API_KEY
+});
+
+const llm = new OpenAI({
+  apiKey: process.env.LLM_API_KEY,
+});
+
+// Retrieve relevant memories
+const records = await memory.retrieve("how should I handle this incident?", {
+  trust: {
+    max_sensitivity: Sensitivity.MEDIUM,
+    authenticated: true,
+    actor_id: "incident-agent",
+    scopes: ["prod"],
+  },
+  memoryTypes: ["semantic", "competence", "working"],
+  limit: 10,
+});
+
+const memoryContext = records.map((r) => JSON.stringify(r)).join("\n");
+
+// Pass to LLM
+const completion = await llm.chat.completions.create({
+  model: "gpt-4",
+  messages: [
+    { role: "system", content: "Use the memory context as evidence. Cite record ids." },
+    { role: "user", content: `Incident task:\n...\n\nMemory:\n${memoryContext}` },
+  ],
+});
+
+console.log(completion.choices[0]?.message?.content);
+memory.close();
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Close Connections" icon="xmark">
+    Always call `client.close()` when done to release gRPC resources.
+  </Card>
+  
+  <Card title="Trust Contexts" icon="shield">
+    Set appropriate `max_sensitivity` levels to enforce access control.
+  </Card>
+  
+  <Card title="Tagging Strategy" icon="tags">
+    Use consistent tags for easier retrieval and filtering.
+  </Card>
+  
+  <Card title="Salience Tuning" icon="chart-line">
+    Use `reinforce()` and `penalize()` to train memory importance over time.
+  </Card>
+</CardGroup>

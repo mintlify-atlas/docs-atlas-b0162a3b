@@ -1,0 +1,519 @@
+---
+title: Ingestion API
+description: Ingest events, tool outputs, observations, outcomes, and working state into Membrane
+---
+
+## Overview
+
+The ingestion API creates memory records from raw experience. All ingestion methods return a `MemoryRecord` with auto-assigned metadata (UUID, timestamps, salience, confidence, decay profile).
+
+<Card title="Episodic Immutability" icon="lock">
+  Episodic records are **append-only** and cannot be revised after creation. Use `IngestOutcome` to update outcome status.
+</Card>
+
+## IngestEvent
+
+Create an episodic memory record from an event (user input, system event, error).
+
+<CodeGroup>
+```typescript TypeScript
+const record = await client.ingestEvent({
+  source: "build-agent",
+  event_kind: "tool_call",
+  ref: "build#42",
+  summary: "Executed go build, failed with linker error",
+  tags: ["build", "error"],
+  scope: "project-acme",
+  sensitivity: Sensitivity.LOW,
+  timestamp: new Date().toISOString()
+});
+```
+
+```python Python
+record = client.ingest_event(
+    source="build-agent",
+    event_kind="tool_call",
+    ref="build#42",
+    summary="Executed go build, failed with linker error",
+    tags=["build", "error"],
+    scope="project-acme",
+    sensitivity=Sensitivity.LOW,
+    timestamp=datetime.utcnow().isoformat()
+)
+```
+
+```go Go
+resp, err := client.IngestEvent(ctx, &membranev1.IngestEventRequest{
+    Source:      "build-agent",
+    EventKind:   "tool_call",
+    Ref:         "build#42",
+    Summary:     "Executed go build, failed with linker error",
+    Tags:        []string{"build", "error"},
+    Scope:       "project-acme",
+    Sensitivity: "low",
+    Timestamp:   time.Now().Format(time.RFC3339),
+})
+```
+</CodeGroup>
+
+### Request Parameters
+
+<ParamField path="source" type="string" required>
+  Identifies the actor or system that produced the event
+</ParamField>
+
+<ParamField path="event_kind" type="string" required>
+  Type of event (e.g., `user_input`, `error`, `system`, `tool_call`)
+</ParamField>
+
+<ParamField path="ref" type="string" required>
+  Reference identifier for the source event
+</ParamField>
+
+<ParamField path="summary" type="string">
+  Human-readable summary of the event
+</ParamField>
+
+<ParamField path="timestamp" type="string (RFC 3339)">
+  When the event occurred. If omitted, uses current time
+</ParamField>
+
+<ParamField path="tags" type="string[]">
+  Optional labels for categorization
+</ParamField>
+
+<ParamField path="scope" type="string">
+  Visibility scope (e.g., `user`, `device`, `project`, `workspace`, `global`)
+</ParamField>
+
+<ParamField path="sensitivity" type="string">
+  Sensitivity classification: `public`, `low`, `medium`, `high`, `hyper`
+</ParamField>
+
+### Response
+
+<ResponseField name="record" type="MemoryRecord">
+  The created episodic record with auto-assigned ID, timestamps, lifecycle, provenance, and audit log
+</ResponseField>
+
+---
+
+## IngestToolOutput
+
+Create an episodic memory record with tool graph data from a tool invocation.
+
+<CodeGroup>
+```typescript TypeScript
+const record = await client.ingestToolOutput({
+  source: "workflow-agent",
+  tool_name: "bash",
+  args: { command: "npm install" },
+  result: { exitCode: 0, stdout: "added 42 packages" },
+  depends_on: ["tool-node-123"],
+  tags: ["npm", "install"],
+  sensitivity: Sensitivity.LOW
+});
+```
+
+```python Python
+record = client.ingest_tool_output(
+    source="workflow-agent",
+    tool_name="bash",
+    args={"command": "npm install"},
+    result={"exitCode": 0, "stdout": "added 42 packages"},
+    depends_on=["tool-node-123"],
+    tags=["npm", "install"],
+    sensitivity=Sensitivity.LOW
+)
+```
+
+```go Go
+argsBytes, _ := json.Marshal(map[string]any{"command": "npm install"})
+resultBytes, _ := json.Marshal(map[string]any{"exitCode": 0, "stdout": "added 42 packages"})
+
+resp, err := client.IngestToolOutput(ctx, &membranev1.IngestToolOutputRequest{
+    Source:    "workflow-agent",
+    ToolName:  "bash",
+    Args:      argsBytes,
+    Result:    resultBytes,
+    DependsOn: []string{"tool-node-123"},
+    Tags:      []string{"npm", "install"},
+    Sensitivity: "low",
+})
+```
+</CodeGroup>
+
+### Request Parameters
+
+<ParamField path="source" type="string" required>
+  Actor or system that invoked the tool
+</ParamField>
+
+<ParamField path="tool_name" type="string" required>
+  Name of the tool that was invoked
+</ParamField>
+
+<ParamField path="args" type="object" required>
+  Arguments passed to the tool (JSON-encoded)
+</ParamField>
+
+<ParamField path="result" type="any" required>
+  Output produced by the tool (JSON-encoded)
+</ParamField>
+
+<ParamField path="depends_on" type="string[]">
+  IDs of tool nodes this output depends on
+</ParamField>
+
+<ParamField path="timestamp" type="string (RFC 3339)">
+  When the tool was invoked. If omitted, uses current time
+</ParamField>
+
+<ParamField path="tags" type="string[]">
+  Optional labels for categorization
+</ParamField>
+
+<ParamField path="scope" type="string">
+  Visibility scope
+</ParamField>
+
+<ParamField path="sensitivity" type="string">
+  Sensitivity classification: `public`, `low`, `medium`, `high`, `hyper`
+</ParamField>
+
+### Response
+
+<ResponseField name="record" type="MemoryRecord">
+  The created episodic record with a `tool_graph` array containing the tool node
+</ResponseField>
+
+---
+
+## IngestObservation
+
+Create a semantic memory record from an observation expressed as subject-predicate-object.
+
+<CodeGroup>
+```typescript TypeScript
+const record = await client.ingestObservation({
+  source: "user-agent",
+  subject: "user",
+  predicate: "prefers_language",
+  object: "go",
+  tags: ["preferences"],
+  sensitivity: Sensitivity.MEDIUM
+});
+```
+
+```python Python
+record = client.ingest_observation(
+    source="user-agent",
+    subject="user",
+    predicate="prefers_language",
+    object="go",
+    tags=["preferences"],
+    sensitivity=Sensitivity.MEDIUM
+)
+```
+
+```go Go
+objectBytes, _ := json.Marshal("go")
+
+resp, err := client.IngestObservation(ctx, &membranev1.IngestObservationRequest{
+    Source:      "user-agent",
+    Subject:     "user",
+    Predicate:   "prefers_language",
+    Object:      objectBytes,
+    Tags:        []string{"preferences"},
+    Sensitivity: "medium",
+})
+```
+</CodeGroup>
+
+### Request Parameters
+
+<ParamField path="source" type="string" required>
+  Actor or system that made the observation
+</ParamField>
+
+<ParamField path="subject" type="string" required>
+  Entity the observation is about
+</ParamField>
+
+<ParamField path="predicate" type="string" required>
+  Relationship or property observed
+</ParamField>
+
+<ParamField path="object" type="any" required>
+  Value or related entity observed (JSON-encoded)
+</ParamField>
+
+<ParamField path="timestamp" type="string (RFC 3339)">
+  When the observation was made. If omitted, uses current time
+</ParamField>
+
+<ParamField path="tags" type="string[]">
+  Optional labels for categorization
+</ParamField>
+
+<ParamField path="scope" type="string">
+  Visibility scope
+</ParamField>
+
+<ParamField path="sensitivity" type="string">
+  Sensitivity classification: `public`, `low`, `medium`, `high`, `hyper`
+</ParamField>
+
+### Response
+
+<ResponseField name="record" type="MemoryRecord">
+  The created semantic record with subject-predicate-object payload and global validity
+</ResponseField>
+
+---
+
+## IngestOutcome
+
+Update an existing episodic record with outcome data (success, failure, partial).
+
+<CodeGroup>
+```typescript TypeScript
+const record = await client.ingestOutcome({
+  source: "build-agent",
+  target_record_id: "episodic-record-uuid",
+  outcome_status: "success",
+  timestamp: new Date().toISOString()
+});
+```
+
+```python Python
+record = client.ingest_outcome(
+    source="build-agent",
+    target_record_id="episodic-record-uuid",
+    outcome_status="success",
+    timestamp=datetime.utcnow().isoformat()
+)
+```
+
+```go Go
+resp, err := client.IngestOutcome(ctx, &membranev1.IngestOutcomeRequest{
+    Source:         "build-agent",
+    TargetRecordId: "episodic-record-uuid",
+    OutcomeStatus:  "success",
+    Timestamp:      time.Now().Format(time.RFC3339),
+})
+```
+</CodeGroup>
+
+### Request Parameters
+
+<ParamField path="source" type="string" required>
+  Actor or system reporting the outcome
+</ParamField>
+
+<ParamField path="target_record_id" type="string" required>
+  ID of the existing episodic record to update
+</ParamField>
+
+<ParamField path="outcome_status" type="string" required>
+  Result status: `success`, `failure`, or `partial`
+</ParamField>
+
+<ParamField path="timestamp" type="string (RFC 3339)">
+  When the outcome was determined. If omitted, uses current time
+</ParamField>
+
+### Response
+
+<ResponseField name="record" type="MemoryRecord">
+  The updated episodic record with outcome status and new audit entry
+</ResponseField>
+
+<Note>
+The target record must be of type `episodic`. Returns `NOT_FOUND` if the record doesn't exist or `INVALID_ARGUMENT` if the record is not episodic.
+</Note>
+
+---
+
+## IngestWorkingState
+
+Create a working memory record from a task state snapshot.
+
+<CodeGroup>
+```typescript TypeScript
+const record = await client.ingestWorkingState({
+  source: "planner-agent",
+  thread_id: "session-001",
+  state: TaskState.EXECUTING,
+  next_actions: ["run tests", "deploy"],
+  open_questions: ["Which environment?"],
+  context_summary: "Backend initialized, frontend pending",
+  active_constraints: [
+    { type: "time", key: "deadline", value: "2026-03-15", required: true }
+  ],
+  tags: ["project-setup"],
+  sensitivity: Sensitivity.LOW
+});
+```
+
+```python Python
+record = client.ingest_working_state(
+    source="planner-agent",
+    thread_id="session-001",
+    state=TaskState.EXECUTING,
+    next_actions=["run tests", "deploy"],
+    open_questions=["Which environment?"],
+    context_summary="Backend initialized, frontend pending",
+    active_constraints=[
+        {"type": "time", "key": "deadline", "value": "2026-03-15", "required": True}
+    ],
+    tags=["project-setup"],
+    sensitivity=Sensitivity.LOW
+)
+```
+
+```go Go
+constraintsBytes, _ := json.Marshal([]map[string]any{
+    {"type": "time", "key": "deadline", "value": "2026-03-15", "required": true},
+})
+
+resp, err := client.IngestWorkingState(ctx, &membranev1.IngestWorkingStateRequest{
+    Source:             "planner-agent",
+    ThreadId:           "session-001",
+    State:              "executing",
+    NextActions:        []string{"run tests", "deploy"},
+    OpenQuestions:      []string{"Which environment?"},
+    ContextSummary:     "Backend initialized, frontend pending",
+    ActiveConstraints:  constraintsBytes,
+    Tags:               []string{"project-setup"},
+    Sensitivity:        "low",
+})
+```
+</CodeGroup>
+
+### Request Parameters
+
+<ParamField path="source" type="string" required>
+  Actor or system that produced the working state
+</ParamField>
+
+<ParamField path="thread_id" type="string" required>
+  Identifier for the current thread/session
+</ParamField>
+
+<ParamField path="state" type="string" required>
+  Current task state: `planning`, `executing`, `blocked`, `waiting`, or `done`
+</ParamField>
+
+<ParamField path="next_actions" type="string[]">
+  Next planned actions
+</ParamField>
+
+<ParamField path="open_questions" type="string[]">
+  Unresolved questions for the task
+</ParamField>
+
+<ParamField path="context_summary" type="string">
+  Summary of the current context
+</ParamField>
+
+<ParamField path="active_constraints" type="Constraint[]">
+  Constraints currently active for the task (JSON-encoded)
+</ParamField>
+
+<ParamField path="timestamp" type="string (RFC 3339)">
+  When the working state was captured. If omitted, uses current time
+</ParamField>
+
+<ParamField path="tags" type="string[]">
+  Optional labels for categorization
+</ParamField>
+
+<ParamField path="scope" type="string">
+  Visibility scope
+</ParamField>
+
+<ParamField path="sensitivity" type="string">
+  Sensitivity classification: `public`, `low`, `medium`, `high`, `hyper`
+</ParamField>
+
+### Response
+
+<ResponseField name="record" type="MemoryRecord">
+  The created working memory record with task state, actions, questions, and constraints
+</ResponseField>
+
+---
+
+## Common Response Fields
+
+All ingestion methods return a `MemoryRecord` with these fields:
+
+<Expandable title="MemoryRecord Structure">
+  <ResponseField name="id" type="string">
+    UUID assigned to the record
+  </ResponseField>
+
+  <ResponseField name="type" type="string">
+    Memory type: `episodic`, `working`, `semantic`, `competence`, or `plan_graph`
+  </ResponseField>
+
+  <ResponseField name="sensitivity" type="string">
+    Sensitivity classification applied by policy engine
+  </ResponseField>
+
+  <ResponseField name="confidence" type="number">
+    Epistemic confidence in range [0, 1]
+  </ResponseField>
+
+  <ResponseField name="salience" type="number">
+    Decay-weighted importance score
+  </ResponseField>
+
+  <ResponseField name="scope" type="string">
+    Visibility scope
+  </ResponseField>
+
+  <ResponseField name="tags" type="string[]">
+    Categorization labels
+  </ResponseField>
+
+  <ResponseField name="created_at" type="string">
+    RFC 3339 timestamp
+  </ResponseField>
+
+  <ResponseField name="updated_at" type="string">
+    RFC 3339 timestamp
+  </ResponseField>
+
+  <ResponseField name="lifecycle" type="Lifecycle">
+    Decay profile, reinforcement timestamp, pinned status, and deletion policy
+  </ResponseField>
+
+  <ResponseField name="provenance" type="Provenance">
+    Source references and creator
+  </ResponseField>
+
+  <ResponseField name="relations" type="Relation[]">
+    Graph edges to other records
+  </ResponseField>
+
+  <ResponseField name="payload" type="Payload">
+    Type-specific structured content
+  </ResponseField>
+
+  <ResponseField name="audit_log" type="AuditEntry[]">
+    All actions performed on this record
+  </ResponseField>
+</Expandable>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Retrieval API" icon="search" href="/api/retrieval">
+    Query memory with trust-aware filtering
+  </Card>
+  <Card title="Revision API" icon="rotate" href="/api/revision">
+    Supersede, fork, retract, and merge records
+  </Card>
+</CardGroup>

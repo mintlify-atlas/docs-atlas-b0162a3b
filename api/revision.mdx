@@ -1,0 +1,619 @@
+---
+title: Revision API
+description: Supersede, fork, retract, merge, contest, reinforce, and penalize memory records
+---
+
+## Overview
+
+The revision API provides seven operations for modifying memory records with full auditability and provenance tracking:
+
+<CardGroup cols={2}>
+  <Card title="Supersede" icon="arrows-rotate">
+    Replace a record with a new version
+  </Card>
+  <Card title="Fork" icon="code-branch">
+    Create a conditional variant
+  </Card>
+  <Card title="Retract" icon="ban">
+    Mark a record as withdrawn
+  </Card>
+  <Card title="Merge" icon="code-merge">
+    Combine multiple records into one
+  </Card>
+  <Card title="Contest" icon="gavel">
+    Mark a record as contested
+  </Card>
+  <Card title="Reinforce" icon="arrow-up">
+    Boost a record's salience
+  </Card>
+  <Card title="Penalize" icon="arrow-down">
+    Reduce a record's salience
+  </Card>
+</CardGroup>
+
+<Warning>
+**Episodic Immutability**: Episodic records are append-only and **cannot** be revised. All revision operations will return an error if attempted on episodic records.
+</Warning>
+
+---
+
+## Supersede
+
+Atomically replace an old record with a new one. The old record is retracted (salience set to 0, status set to "retracted") and the new record is linked via provenance and a "supersedes" relation.
+
+<CodeGroup>
+```typescript TypeScript
+const newRecord = {
+  type: "semantic",
+  sensitivity: Sensitivity.MEDIUM,
+  payload: {
+    kind: "semantic",
+    subject: "user",
+    predicate: "prefers_language",
+    object: "rust",
+    validity: { mode: "global" },
+    evidence: [{ source_type: "observation", source_id: "obs-123" }],
+    revision_policy: "replace"
+  }
+};
+
+const result = await client.supersede(
+  "old-record-uuid",
+  newRecord,
+  "update-agent",
+  "User preference changed from Go to Rust"
+);
+```
+
+```python Python
+new_record = MemoryRecord(
+    type="semantic",
+    sensitivity=Sensitivity.MEDIUM,
+    payload=SemanticPayload(
+        kind="semantic",
+        subject="user",
+        predicate="prefers_language",
+        object="rust",
+        validity={"mode": "global"},
+        evidence=[{"source_type": "observation", "source_id": "obs-123"}],
+        revision_policy="replace"
+    )
+)
+
+result = client.supersede(
+    old_id="old-record-uuid",
+    new_record=new_record,
+    actor="update-agent",
+    rationale="User preference changed from Go to Rust"
+)
+```
+
+```go Go
+newRecordBytes, _ := json.Marshal(map[string]any{
+    "type": "semantic",
+    "sensitivity": "medium",
+    "payload": map[string]any{
+        "kind": "semantic",
+        "subject": "user",
+        "predicate": "prefers_language",
+        "object": "rust",
+        "validity": map[string]any{"mode": "global"},
+        "evidence": []map[string]any{{"source_type": "observation", "source_id": "obs-123"}},
+        "revision_policy": "replace",
+    },
+})
+
+resp, err := client.Supersede(ctx, &membranev1.SupersedeRequest{
+    OldId:      "old-record-uuid",
+    NewRecord:  newRecordBytes,
+    Actor:      "update-agent",
+    Rationale:  "User preference changed from Go to Rust",
+})
+```
+</CodeGroup>
+
+### Request Parameters
+
+<ParamField path="old_id" type="string" required>
+  UUID of the record to be superseded
+</ParamField>
+
+<ParamField path="new_record" type="MemoryRecord" required>
+  The new record that replaces the old one. Must include `type`, `sensitivity`, `payload`, and optionally `confidence`, `salience`, `scope`, `tags`
+</ParamField>
+
+<ParamField path="actor" type="string" required>
+  Identifier of the actor performing the supersede operation
+</ParamField>
+
+<ParamField path="rationale" type="string" required>
+  Human-readable explanation for why this record is being superseded
+</ParamField>
+
+### Response
+
+<ResponseField name="record" type="MemoryRecord">
+  The newly created record with:
+  - Auto-assigned UUID
+  - `relations` array containing a "supersedes" link to the old record
+  - `provenance.sources` referencing the old record
+  - Semantic payload with `revision.supersedes` field set to old record ID
+  - Audit log entry documenting the supersede operation
+</ResponseField>
+
+### Behavior
+
+The operation is atomic and performs these steps within a single transaction:
+
+1. Retrieve and validate the old record (must be revisable, not episodic)
+2. Validate the new record has evidence (for semantic records)
+3. Retract the old record (salience → 0, status → "retracted")
+4. Set old record's `revision.superseded_by` to new record ID
+5. Assign UUID to new record
+6. Add provenance source linking to old record
+7. Add "supersedes" relation from new → old
+8. Add audit entries to both records
+9. Store the new record
+
+---
+
+## Fork
+
+Create a conditional variant of an existing record. Unlike supersede, **both records remain active** — this is for conditional validity, not replacement.
+
+<CodeGroup>
+```typescript TypeScript
+const forkedRecord = {
+  type: "semantic",
+  sensitivity: Sensitivity.MEDIUM,
+  payload: {
+    kind: "semantic",
+    subject: "deployment",
+    predicate: "uses_blue_green",
+    object: true,
+    validity: {
+      mode: "conditional",
+      conditions: { environment: "production" }
+    },
+    evidence: [{ source_type: "observation", source_id: "deploy-config-001" }]
+  }
+};
+
+const result = await client.fork(
+  "source-record-uuid",
+  forkedRecord,
+  "config-agent",
+  "Production uses blue-green, staging uses rolling"
+);
+```
+
+```python Python
+forked_record = MemoryRecord(
+    type="semantic",
+    sensitivity=Sensitivity.MEDIUM,
+    payload=SemanticPayload(
+        kind="semantic",
+        subject="deployment",
+        predicate="uses_blue_green",
+        object=True,
+        validity={
+            "mode": "conditional",
+            "conditions": {"environment": "production"}
+        },
+        evidence=[{"source_type": "observation", "source_id": "deploy-config-001"}]
+    )
+)
+
+result = client.fork(
+    source_id="source-record-uuid",
+    forked_record=forked_record,
+    actor="config-agent",
+    rationale="Production uses blue-green, staging uses rolling"
+)
+```
+</CodeGroup>
+
+### Request Parameters
+
+<ParamField path="source_id" type="string" required>
+  UUID of the source record to fork from
+</ParamField>
+
+<ParamField path="forked_record" type="MemoryRecord" required>
+  The new conditional variant record
+</ParamField>
+
+<ParamField path="actor" type="string" required>
+  Identifier of the actor performing the fork operation
+</ParamField>
+
+<ParamField path="rationale" type="string" required>
+  Explanation for why this fork was created
+</ParamField>
+
+### Response
+
+<ResponseField name="record" type="MemoryRecord">
+  The newly created forked record with:
+  - Auto-assigned UUID
+  - `relations` array containing a "derived_from" link to the source record
+  - Audit log entry documenting the fork operation
+</ResponseField>
+
+---
+
+## Retract
+
+Mark a record as retracted without deleting it, preserving auditability. Salience is set to 0 and semantic records are marked with status "retracted".
+
+<CodeGroup>
+```typescript TypeScript
+await client.retract(
+  "record-uuid",
+  "moderator-agent",
+  "Record contains outdated information"
+);
+```
+
+```python Python
+client.retract(
+    id="record-uuid",
+    actor="moderator-agent",
+    rationale="Record contains outdated information"
+)
+```
+
+```go Go
+_, err := client.Retract(ctx, &membranev1.RetractRequest{
+    Id:        "record-uuid",
+    Actor:     "moderator-agent",
+    Rationale: "Record contains outdated information",
+})
+```
+</CodeGroup>
+
+### Request Parameters
+
+<ParamField path="id" type="string" required>
+  UUID of the record to retract
+</ParamField>
+
+<ParamField path="actor" type="string" required>
+  Identifier of the actor performing the retract operation
+</ParamField>
+
+<ParamField path="rationale" type="string" required>
+  Explanation for why this record is being retracted
+</ParamField>
+
+### Response
+
+Returns an empty response on success.
+
+### Behavior
+
+1. Retrieve and validate the record (must be revisable, not episodic)
+2. Set salience to 0
+3. For semantic records, set `revision.status` to "retracted"
+4. Update `updated_at` timestamp
+5. Add audit entry with action "delete"
+
+---
+
+## Merge
+
+Atomically combine multiple source records into a single merged record. All source records are retracted and the merged record is linked via "derived_from" relations.
+
+<CodeGroup>
+```typescript TypeScript
+const mergedRecord = {
+  type: "semantic",
+  sensitivity: Sensitivity.MEDIUM,
+  payload: {
+    kind: "semantic",
+    subject: "user",
+    predicate: "tech_preferences",
+    object: { languages: ["go", "rust"], framework: "htmx" },
+    validity: { mode: "global" },
+    evidence: [
+      { source_type: "observation", source_id: "pref-1" },
+      { source_type: "observation", source_id: "pref-2" }
+    ]
+  }
+};
+
+const result = await client.merge(
+  ["record-1-uuid", "record-2-uuid", "record-3-uuid"],
+  mergedRecord,
+  "consolidation-agent",
+  "Merged duplicate preference records"
+);
+```
+
+```python Python
+merged_record = MemoryRecord(
+    type="semantic",
+    sensitivity=Sensitivity.MEDIUM,
+    payload=SemanticPayload(
+        kind="semantic",
+        subject="user",
+        predicate="tech_preferences",
+        object={"languages": ["go", "rust"], "framework": "htmx"},
+        validity={"mode": "global"},
+        evidence=[
+            {"source_type": "observation", "source_id": "pref-1"},
+            {"source_type": "observation", "source_id": "pref-2"}
+        ]
+    )
+)
+
+result = client.merge(
+    ids=["record-1-uuid", "record-2-uuid", "record-3-uuid"],
+    merged_record=merged_record,
+    actor="consolidation-agent",
+    rationale="Merged duplicate preference records"
+)
+```
+</CodeGroup>
+
+### Request Parameters
+
+<ParamField path="ids" type="string[]" required>
+  Array of UUIDs for the records to be merged (minimum 1 record)
+</ParamField>
+
+<ParamField path="merged_record" type="MemoryRecord" required>
+  The consolidated record that combines all source records
+</ParamField>
+
+<ParamField path="actor" type="string" required>
+  Identifier of the actor performing the merge operation
+</ParamField>
+
+<ParamField path="rationale" type="string" required>
+  Explanation for why these records are being merged
+</ParamField>
+
+### Response
+
+<ResponseField name="record" type="MemoryRecord">
+  The newly created merged record with:
+  - Auto-assigned UUID
+  - `relations` array containing "derived_from" links to all source records
+  - Audit log entry documenting the merge operation
+</ResponseField>
+
+---
+
+## Contest
+
+Mark a record as contested, indicating conflicting evidence exists. The record remains active but its status is set to "contested".
+
+<CodeGroup>
+```typescript TypeScript
+await client.contest(
+  "record-uuid",
+  "conflicting-record-uuid",
+  "verification-agent",
+  "New evidence contradicts this claim"
+);
+```
+
+```python Python
+client.contest(
+    id="record-uuid",
+    contesting_ref="conflicting-record-uuid",
+    actor="verification-agent",
+    rationale="New evidence contradicts this claim"
+)
+```
+
+```go Go
+_, err := client.Contest(ctx, &membranev1.ContestRequest{
+    Id:            "record-uuid",
+    ContestingRef: "conflicting-record-uuid",
+    Actor:         "verification-agent",
+    Rationale:     "New evidence contradicts this claim",
+})
+```
+</CodeGroup>
+
+### Request Parameters
+
+<ParamField path="id" type="string" required>
+  UUID of the record to mark as contested
+</ParamField>
+
+<ParamField path="contesting_ref" type="string" required>
+  UUID of the conflicting record or evidence
+</ParamField>
+
+<ParamField path="actor" type="string" required>
+  Identifier of the actor performing the contest operation
+</ParamField>
+
+<ParamField path="rationale" type="string" required>
+  Explanation for why this record is being contested
+</ParamField>
+
+### Response
+
+Returns an empty response on success.
+
+### Behavior
+
+1. Retrieve and validate the record (must be revisable, not episodic)
+2. For semantic records, set `revision.status` to "contested"
+3. Add a "contested_by" relation to the contesting record
+4. Add audit entry with action "revise"
+
+---
+
+## Reinforce
+
+Boost a record's salience by resetting its decay timer. This is typically called when a record was useful during retrieval.
+
+<CodeGroup>
+```typescript TypeScript
+await client.reinforce(
+  "record-uuid",
+  "retrieval-agent",
+  "Used successfully in task planning"
+);
+```
+
+```python Python
+client.reinforce(
+    id="record-uuid",
+    actor="retrieval-agent",
+    rationale="Used successfully in task planning"
+)
+```
+
+```go Go
+_, err := client.Reinforce(ctx, &membranev1.ReinforceRequest{
+    Id:        "record-uuid",
+    Actor:     "retrieval-agent",
+    Rationale: "Used successfully in task planning",
+})
+```
+</CodeGroup>
+
+### Request Parameters
+
+<ParamField path="id" type="string" required>
+  UUID of the record to reinforce
+</ParamField>
+
+<ParamField path="actor" type="string" required>
+  Identifier of the actor performing the reinforce operation
+</ParamField>
+
+<ParamField path="rationale" type="string" required>
+  Explanation for why this record is being reinforced
+</ParamField>
+
+### Response
+
+Returns an empty response on success.
+
+### Behavior
+
+1. Retrieve the record
+2. Reset `lifecycle.last_reinforced_at` to current time
+3. Add audit entry with action "reinforce"
+
+This effectively resets the decay curve, making the record "fresh" again.
+
+---
+
+## Penalize
+
+Reduce a record's salience by a specified amount. This is typically called when a record was retrieved but not useful.
+
+<CodeGroup>
+```typescript TypeScript
+await client.penalize(
+  "record-uuid",
+  0.2,
+  "retrieval-agent",
+  "Retrieved but not applicable to task"
+);
+```
+
+```python Python
+client.penalize(
+    id="record-uuid",
+    amount=0.2,
+    actor="retrieval-agent",
+    rationale="Retrieved but not applicable to task"
+)
+```
+
+```go Go
+_, err := client.Penalize(ctx, &membranev1.PenalizeRequest{
+    Id:        "record-uuid",
+    Amount:    0.2,
+    Actor:     "retrieval-agent",
+    Rationale: "Retrieved but not applicable to task",
+})
+```
+</CodeGroup>
+
+### Request Parameters
+
+<ParamField path="id" type="string" required>
+  UUID of the record to penalize
+</ParamField>
+
+<ParamField path="amount" type="number" required>
+  Amount to reduce salience by (e.g., 0.2 reduces salience by 0.2 points)
+</ParamField>
+
+<ParamField path="actor" type="string" required>
+  Identifier of the actor performing the penalize operation
+</ParamField>
+
+<ParamField path="rationale" type="string" required>
+  Explanation for why this record is being penalized
+</ParamField>
+
+### Response
+
+Returns an empty response on success.
+
+### Behavior
+
+1. Retrieve the record
+2. Subtract `amount` from `salience` (minimum: 0)
+3. Add audit entry with action "decay"
+
+---
+
+## Transactional Guarantees
+
+All revision operations are **atomic**. Partial revisions are never externally visible:
+
+- Supersede: Old record retraction + new record creation + relation/provenance updates happen in a single transaction
+- Fork: Source record audit + new record creation + relation updates happen in a single transaction
+- Merge: All source record retractions + merged record creation + relations happen in a single transaction
+
+If any step fails, the entire operation is rolled back.
+
+---
+
+## Audit Trail
+
+Every revision operation appends entries to the affected records' audit logs:
+
+```json
+{
+  "action": "revise",
+  "actor": "update-agent",
+  "timestamp": "2026-03-13T10:30:00Z",
+  "rationale": "User preference changed from Go to Rust"
+}
+```
+
+| Action | Used By |
+|--------|----------|
+| `create` | All operations that create new records (supersede, fork, merge) |
+| `revise` | Supersede (old record), Contest |
+| `fork` | Fork (source record) |
+| `merge` | Merge (source records) |
+| `delete` | Retract |
+| `reinforce` | Reinforce |
+| `decay` | Penalize, automatic decay job |
+
+---
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Ingestion API" icon="download" href="/api/ingestion">
+    Ingest events, tool outputs, and observations
+  </Card>
+  <Card title="Metrics API" icon="chart-line" href="/api/metrics">
+    Monitor memory growth and revision rates
+  </Card>
+</CardGroup>

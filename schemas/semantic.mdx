@@ -1,0 +1,297 @@
+---
+title: 'Semantic Memory'
+description: 'Revisable facts stored as subject-predicate-object triples'
+icon: 'database'
+---
+
+## Overview
+
+Semantic memory stores revisable facts as subject-predicate-object triples. It represents stable knowledge such as preferences, environment facts, and relationships that can evolve over time.
+
+**Key Characteristics:**
+- Supports multiple conditional truths (RFC 15A.8)
+- Revisable with provenance tracking
+- Context-dependent validity
+- Evidence-based with audit trail
+- Long-lived and stable
+
+## Use Cases
+
+- Storing user preferences and settings
+- Recording environment facts and configurations
+- Maintaining relationships between entities
+- Tracking knowledge that changes over time
+- Supporting conditional and timeboxed facts
+
+## Schema
+
+<ParamField path="kind" type="string" required>
+  Payload type identifier. Must be `"semantic"`.
+</ParamField>
+
+<ParamField path="subject" type="string" required>
+  The entity the fact is about (e.g., `"user:alice"`, `"project:membrane"`, `"env:production"`).
+</ParamField>
+
+<ParamField path="predicate" type="string" required>
+  The relationship or property (e.g., `"prefers"`, `"uses"`, `"requires"`, `"location"`).
+</ParamField>
+
+<ParamField path="object" type="any" required>
+  The value or related entity. Can be:
+  - String: `"vim"`
+  - Number: `42`
+  - Boolean: `true`
+  - Object: `{"editor": "vim", "theme": "dark"}`
+  - Array: `["go", "python", "typescript"]`
+</ParamField>
+
+<ParamField path="validity" type="object" required>
+  Defines when this fact is valid.
+  
+  <Expandable title="Validity properties">
+    <ResponseField name="mode" type="string" required>
+      Validity mode. One of:
+      - `"global"` - Universally valid
+      - `"conditional"` - Valid under specific conditions
+      - `"timeboxed"` - Valid within a time window
+    </ResponseField>
+    
+    <ResponseField name="conditions" type="object">
+      Implementation-defined conditional keys (required when mode is `"conditional"`).
+      Example: `{"env": "production", "region": "us-west"}`
+    </ResponseField>
+    
+    <ResponseField name="start" type="timestamp">
+      Start of validity window (used with `"timeboxed"` mode).
+    </ResponseField>
+    
+    <ResponseField name="end" type="timestamp">
+      End of validity window (used with `"timeboxed"` mode).
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="evidence" type="array">
+  Links to provenance supporting this fact.
+  
+  <Expandable title="ProvenanceRef properties">
+    <ResponseField name="source_type" type="string" required>
+      Type of evidence source (e.g., `"event"`, `"tool"`, `"observation"`, `"human"`).
+    </ResponseField>
+    
+    <ResponseField name="source_id" type="string" required>
+      Unique identifier for the source.
+    </ResponseField>
+    
+    <ResponseField name="timestamp" type="timestamp" required>
+      When this evidence was created.
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="revision_policy" type="string">
+  Defines how this fact should be revised. One of:
+  - `"replace"` - New fact replaces old one
+  - `"fork"` - Create conditional variants
+  - `"contest"` - Mark as contested until resolved
+</ParamField>
+
+<ParamField path="revision" type="object">
+  Tracks revision state for this fact.
+  
+  <Expandable title="RevisionState properties">
+    <ResponseField name="supersedes" type="string">
+      ID of the memory record this supersedes.
+    </ResponseField>
+    
+    <ResponseField name="superseded_by" type="string">
+      ID of the record that supersedes this one.
+    </ResponseField>
+    
+    <ResponseField name="status" type="string">
+      Current revision status:
+      - `"active"` - Record is currently valid
+      - `"contested"` - Uncertainty until resolved
+      - `"retracted"` - Record has been withdrawn
+    </ResponseField>
+  </Expandable>
+</ParamField>
+
+## Examples
+
+<CodeGroup>
+```json global-preference.json
+{
+  "kind": "semantic",
+  "subject": "user:alice",
+  "predicate": "prefers_editor",
+  "object": "vim",
+  "validity": {
+    "mode": "global"
+  },
+  "evidence": [
+    {
+      "source_type": "human",
+      "source_id": "onboarding_survey_2024",
+      "timestamp": "2024-01-15T10:00:00Z"
+    }
+  ],
+  "revision_policy": "replace"
+}
+```
+
+```json conditional-fact.json
+{
+  "kind": "semantic",
+  "subject": "service:api",
+  "predicate": "port",
+  "object": 8080,
+  "validity": {
+    "mode": "conditional",
+    "conditions": {
+      "environment": "development"
+    }
+  },
+  "evidence": [
+    {
+      "source_type": "observation",
+      "source_id": "config_scan_dev_env",
+      "timestamp": "2026-03-13T09:00:00Z"
+    }
+  ]
+}
+```
+
+```json timeboxed-fact.json
+{
+  "kind": "semantic",
+  "subject": "user:bob",
+  "predicate": "on_vacation",
+  "object": true,
+  "validity": {
+    "mode": "timeboxed",
+    "start": "2026-03-20T00:00:00Z",
+    "end": "2026-03-27T23:59:59Z"
+  },
+  "evidence": [
+    {
+      "source_type": "human",
+      "source_id": "calendar_event_vacation",
+      "timestamp": "2026-03-10T14:00:00Z"
+    }
+  ]
+}
+```
+
+```json revision-example.json
+{
+  "kind": "semantic",
+  "subject": "project:membrane",
+  "predicate": "primary_language",
+  "object": "go",
+  "validity": {
+    "mode": "global"
+  },
+  "evidence": [
+    {
+      "source_type": "tool",
+      "source_id": "repo_analysis_2026_03",
+      "timestamp": "2026-03-13T08:00:00Z"
+    }
+  ],
+  "revision": {
+    "supersedes": "mem_xyz789",
+    "status": "active"
+  },
+  "revision_policy": "replace"
+}
+```
+</CodeGroup>
+
+## Lifecycle Rules
+
+### Revisability
+
+**Semantic payloads MUST support coexistence of multiple conditional truths** (RFC 15A.8). Facts can be:
+
+- **Replaced** - New fact supersedes old one (with audit trail)
+- **Forked** - Multiple conditional variants coexist
+- **Contested** - Marked as uncertain pending resolution
+- **Retracted** - Explicitly withdrawn (but retained in audit trail)
+
+### Validity Modes
+
+#### Global Validity
+Fact is universally true across all contexts:
+```json
+{"mode": "global"}
+```
+
+#### Conditional Validity
+Fact is true only under specific conditions:
+```json
+{
+  "mode": "conditional",
+  "conditions": {"env": "production", "region": "us-west"}
+}
+```
+
+#### Timeboxed Validity
+Fact is true within a time window:
+```json
+{
+  "mode": "timeboxed",
+  "start": "2026-03-20T00:00:00Z",
+  "end": "2026-03-27T23:59:59Z"
+}
+```
+
+### Evidence Requirements
+
+All semantic facts SHOULD include evidence:
+- Links to source observations or events
+- Timestamp of evidence creation
+- Source type classification
+- Enables provenance tracking and confidence assessment
+
+## Best Practices
+
+<Card title="Subject Naming" icon="tag">
+  Use namespaced subject identifiers: `"type:identifier"`. Examples: `"user:alice"`, `"env:prod"`, `"service:api"`.
+</Card>
+
+<Card title="Predicate Consistency" icon="link">
+  Maintain consistent predicate vocabulary across your system. Define a schema or ontology for common relationships.
+</Card>
+
+<Card title="Evidence Tracking" icon="shield-check">
+  Always provide evidence for semantic facts. This enables confidence scoring and provenance queries.
+</Card>
+
+<Card title="Revision Policies" icon="code-branch">
+  Choose revision policies based on fact stability:
+  - `"replace"` for preferences and settings
+  - `"fork"` for context-dependent facts
+  - `"contest"` for uncertain or disputed facts
+</Card>
+
+<Card title="Conditional Facts" icon="filter">
+  Use conditional validity for environment-specific or context-dependent facts rather than duplicating records.
+</Card>
+
+## Querying Semantic Memory
+
+Semantic memory supports rich queries:
+
+- **By subject**: Find all facts about an entity
+- **By predicate**: Find all instances of a relationship
+- **By validity**: Filter by conditions or time windows
+- **By evidence**: Trace provenance chain
+- **Graph traversal**: Follow relationships between entities
+
+## Related
+
+- [Episodic Memory](/schemas/episodic) - Raw observations that become semantic facts
+- [Working Memory](/schemas/working) - Current task context using semantic facts
+- [Competence Memory](/schemas/competence) - Procedures that operate on semantic facts

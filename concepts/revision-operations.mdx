@@ -1,0 +1,661 @@
+---
+title: Revision Operations
+description: Supersede, fork, retract, merge, and contest operations for evidence-based knowledge updates
+---
+
+Membrane provides five atomic revision operations that enable safe, auditable knowledge updates. All operations execute within transactions, ensuring partial revisions are never externally visible.
+
+<Warning>
+  Episodic records are immutable and cannot be revised. Attempting to revise episodic memory returns `ErrEpisodicImmutable`.
+</Warning>
+
+## Revision Principles
+
+All revision operations follow these principles:
+
+1. **Atomicity:** Operations execute in transactions; partial states are never visible
+2. **Auditability:** Every revision generates audit entries on all affected records
+3. **Evidence-based:** Semantic revisions require provenance links or evidence references
+4. **Relationship tracking:** Relations (`supersedes`, `derived_from`, `contested_by`) link records
+5. **Salience preservation:** New records inherit appropriate salience; old records are retracted
+
+## Supersede
+
+**Purpose:** Atomically replace an old record with a new version.
+
+### Behavior
+
+1. Old record: salience → 0, semantic status → `retracted`, `superseded_by` link added
+2. New record: assigned fresh ID, `supersedes` relation to old record, provenance includes old ID
+3. Both records: audit entries documenting the supersession
+
+### Implementation
+
+```go
+// From pkg/revision/supersede.go
+func (s *Service) Supersede(ctx context.Context, oldID string, newRecord *schema.MemoryRecord, actor, rationale string) (*schema.MemoryRecord, error) {
+    err := storage.WithTransaction(ctx, s.store, func(tx storage.Transaction) error {
+        now := time.Now().UTC()
+        
+        // 1. Get old record and verify it is revisable
+        oldRec, err := tx.Get(ctx, oldID)
+        if err := ensureRevisable(oldRec); err != nil {
+            return err
+        }
+        
+        // 2. Retract old record (salience → 0, mark semantic as retracted)
+        retractRecord(oldRec)
+        
+        // For semantic payloads, also record the superseded-by link
+        if sp, ok := oldRec.Payload.(*schema.SemanticPayload); ok {
+            if sp.Revision == nil {
+                sp.Revision = &schema.RevisionState{}
+            }
+            sp.Revision.SupersededBy = newRecord.ID
+        }
+        
+        oldRec.UpdatedAt = now
+        tx.Update(ctx, oldRec)
+        
+        // 3. Assign new ID and set provenance
+        if newRecord.ID == "" {
+            newRecord.ID = uuid.New().String()
+        }
+        
+        // 4. For semantic payloads, set the supersedes link
+        if sp, ok := newRecord.Payload.(*schema.SemanticPayload); ok {
+            if sp.Revision == nil {
+                sp.Revision = &schema.RevisionState{}
+            }
+            sp.Revision.Supersedes = oldID
+            sp.Revision.Status = schema.RevisionStatusActive
+        }
+        
+        // 5. Add "supersedes" relation
+        newRecord.Relations = append(newRecord.Relations, schema.Relation{
+            Predicate: "supersedes",
+            TargetID:  oldID,
+            Weight:    1.0,
+            CreatedAt: now,
+        })
+        
+        // 6. Add audit entries and store
+        tx.AddAuditEntry(ctx, oldID, newAuditEntry(
+            schema.AuditActionRevise,
+            actor,
+            fmt.Sprintf("superseded by %s: %s", newRecord.ID, rationale),
+            now,
+        ))
+        
+        newRecord.AuditLog = append(newRecord.AuditLog, newAuditEntry(
+            schema.AuditActionCreate,
+            actor,
+            fmt.Sprintf("supersedes %s: %s", oldID, rationale),
+            now,
+        ))
+        
+        tx.Create(ctx, newRecord)
+        return nil
+    })
+    return newRecord, err
+}
+```
+
+### Usage Example
+
+<Tabs>
+  <Tab title="Go Library">
+    ```go
+    package main
+    
+    import (
+        "context"
+        "github.com/GustyCube/membrane/pkg/membrane"
+        "github.com/GustyCube/membrane/pkg/schema"
+    )
+    
+    func updatePreference(ctx context.Context, m *membrane.Membrane) {
+        // Create new semantic record with updated value
+        newRec := schema.NewMemoryRecord(
+            "", // ID will be auto-assigned
+            schema.MemoryTypeSemantic,
+            schema.SensitivityLow,
+            &schema.SemanticPayload{
+                Kind:      "semantic",
+                Subject:   "user",
+                Predicate: "prefers_backend_language",
+                Object:    "rust", // Changed from "go"
+                Validity: schema.Validity{
+                    Mode: schema.ValidityModeGlobal,
+                },
+                Revision: &schema.RevisionState{
+                    Status: schema.RevisionStatusActive,
+                },
+            },
+        )
+        newRec.Confidence = 0.95
+        newRec.Scope = "user"
+        
+        // Supersede old record
+        superseded, err := m.Supersede(
+            ctx,
+            "old-record-id",
+            newRec,
+            "agent",
+            "User switched to Rust for new projects",
+        )
+        if err != nil {
+            // Handle error
+        }
+        
+        // superseded now contains the new record with full provenance
+    }
+    ```
+  </Tab>
+  <Tab title="gRPC (TypeScript)">
+    ```typescript
+    import { MembraneClient, Sensitivity } from "@gustycube/membrane";
+    
+    const client = new MembraneClient("localhost:9090", { apiKey: "your-key" });
+    
+    async function updatePreference() {
+      const newRecord = {
+        type: "semantic",
+        sensitivity: Sensitivity.LOW,
+        confidence: 0.95,
+        payload: {
+          kind: "semantic",
+          subject: "user",
+          predicate: "prefers_backend_language",
+          object: "rust",
+          validity: { mode: "global" },
+          revision: { status: "active" },
+        },
+      };
+      
+      const superseded = await client.supersede(
+        "old-record-id",
+        newRecord,
+        "agent",
+        "User switched to Rust for new projects"
+      );
+      
+      console.log("New record:", superseded.id);
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Fork
+
+**Purpose:** Create a conditional variant of an existing record without retracting the source.
+
+<Note>
+  Unlike `Supersede`, both the source and forked record remain active. Use fork for conditional validity (e.g., different preferences per project type).
+</Note>
+
+### Behavior
+
+1. Source record: unchanged, remains active
+2. Forked record: new ID, `derived_from` relation to source
+3. Both records: audit entries documenting the fork
+
+### Implementation
+
+```go
+// From pkg/revision/fork.go
+func (s *Service) Fork(ctx context.Context, sourceID string, forkedRecord *schema.MemoryRecord, actor, rationale string) (*schema.MemoryRecord, error) {
+    err := storage.WithTransaction(ctx, s.store, func(tx storage.Transaction) error {
+        now := time.Now().UTC()
+        
+        // 1. Get source record and verify revisable
+        sourceRec, err := tx.Get(ctx, sourceID)
+        if err := ensureRevisable(sourceRec); err != nil {
+            return err
+        }
+        
+        // 2. Assign new ID
+        if forkedRecord.ID == "" {
+            forkedRecord.ID = uuid.New().String()
+        }
+        
+        // 3. Create "derived_from" relation to source
+        forkedRecord.Relations = append(forkedRecord.Relations, schema.Relation{
+            Predicate: "derived_from",
+            TargetID:  sourceID,
+            Weight:    1.0,
+            CreatedAt: now,
+        })
+        
+        // 4. Add audit entries to both records
+        tx.AddAuditEntry(ctx, sourceID, newAuditEntry(
+            schema.AuditActionFork,
+            actor,
+            fmt.Sprintf("forked to %s: %s", forkedRecord.ID, rationale),
+            now,
+        ))
+        
+        forkedRecord.AuditLog = append(forkedRecord.AuditLog, newAuditEntry(
+            schema.AuditActionCreate,
+            actor,
+            fmt.Sprintf("forked from %s: %s", sourceID, rationale),
+            now,
+        ))
+        
+        // 5. Store forked record
+        tx.Create(ctx, forkedRecord)
+        return nil
+    })
+    return forkedRecord, err
+}
+```
+
+### Usage Example
+
+```go
+// Fork a preference for a specific project type
+forkedRec := schema.NewMemoryRecord(
+    "",
+    schema.MemoryTypeSemantic,
+    schema.SensitivityLow,
+    &schema.SemanticPayload{
+        Kind:      "semantic",
+        Subject:   "user",
+        Predicate: "prefers_backend_language",
+        Object:    "python",
+        Validity: schema.Validity{
+            Mode: schema.ValidityModeConditional,
+            Conditions: map[string]any{
+                "project_kind": "data_science",
+            },
+        },
+        Revision: &schema.RevisionState{
+            Status: schema.RevisionStatusActive,
+        },
+    },
+)
+forkedRec.Confidence = 0.90
+
+forked, err := m.Fork(
+    ctx,
+    "global-pref-id",
+    forkedRec,
+    "agent",
+    "Different language preference for data science projects",
+)
+```
+
+## Retract
+
+**Purpose:** Mark a record as retracted without deleting it, preserving auditability.
+
+### Behavior
+
+1. Record: salience → 0, semantic status → `retracted`
+2. Audit: `delete` action entry added
+3. Storage: record remains in database but effectively inactive
+
+### Implementation
+
+```go
+// From pkg/revision/retract.go
+func (s *Service) Retract(ctx context.Context, id, actor, rationale string) error {
+    err := storage.WithTransaction(ctx, s.store, func(tx storage.Transaction) error {
+        now := time.Now().UTC()
+        
+        // 1. Get record and verify revisable
+        rec, err := tx.Get(ctx, id)
+        if err := ensureRevisable(rec); err != nil {
+            return err
+        }
+        
+        // 2. Mark as retracted
+        retractRecord(rec) // Sets salience to 0, semantic status to retracted
+        
+        rec.UpdatedAt = now
+        tx.Update(ctx, rec)
+        
+        // 3. Add audit entry
+        tx.AddAuditEntry(ctx, id, newAuditEntry(
+            schema.AuditActionDelete,
+            actor,
+            rationale,
+            now,
+        ))
+        
+        return nil
+    })
+    return err
+}
+
+// Helper function
+func retractRecord(rec *schema.MemoryRecord) {
+    rec.Salience = 0
+    if sp, ok := rec.Payload.(*schema.SemanticPayload); ok {
+        if sp.Revision == nil {
+            sp.Revision = &schema.RevisionState{}
+        }
+        sp.Revision.Status = schema.RevisionStatusRetracted
+    }
+}
+```
+
+### Usage Example
+
+```go
+err := m.Retract(
+    ctx,
+    "record-id",
+    "agent",
+    "Fact no longer accurate after system upgrade",
+)
+```
+
+## Merge
+
+**Purpose:** Combine multiple source records into a single consolidated record.
+
+### Behavior
+
+1. All source records: salience → 0, retracted
+2. Merged record: new ID, `derived_from` relations to all sources
+3. All records: audit entries documenting the merge
+
+### Implementation
+
+```go
+// From pkg/revision/merge.go
+func (s *Service) Merge(ctx context.Context, recordIDs []string, mergedRecord *schema.MemoryRecord, actor, rationale string) (*schema.MemoryRecord, error) {
+    err := storage.WithTransaction(ctx, s.store, func(tx storage.Transaction) error {
+        now := time.Now().UTC()
+        
+        // 1. Get all source records and verify revisable
+        sourceRecords := make([]*schema.MemoryRecord, 0, len(recordIDs))
+        for _, id := range recordIDs {
+            rec, err := tx.Get(ctx, id)
+            if err := ensureRevisable(rec); err != nil {
+                return err
+            }
+            sourceRecords = append(sourceRecords, rec)
+        }
+        
+        // 2. Retract all source records
+        for _, rec := range sourceRecords {
+            retractRecord(rec)
+            rec.UpdatedAt = now
+            tx.Update(ctx, rec)
+        }
+        
+        // 3. Assign new ID
+        if mergedRecord.ID == "" {
+            mergedRecord.ID = uuid.New().String()
+        }
+        
+        // Create "derived_from" relations to all sources
+        for _, id := range recordIDs {
+            mergedRecord.Relations = append(mergedRecord.Relations, schema.Relation{
+                Predicate: "derived_from",
+                TargetID:  id,
+                Weight:    1.0,
+                CreatedAt: now,
+            })
+        }
+        
+        // 4. Add audit entries
+        for _, id := range recordIDs {
+            tx.AddAuditEntry(ctx, id, newAuditEntry(
+                schema.AuditActionMerge,
+                actor,
+                fmt.Sprintf("merged into %s: %s", mergedRecord.ID, rationale),
+                now,
+            ))
+        }
+        
+        mergedRecord.AuditLog = append(mergedRecord.AuditLog, newAuditEntry(
+            schema.AuditActionCreate,
+            actor,
+            fmt.Sprintf("merged from %v: %s", recordIDs, rationale),
+            now,
+        ))
+        
+        // 5. Store merged record
+        tx.Create(ctx, mergedRecord)
+        return nil
+    })
+    return mergedRecord, err
+}
+```
+
+### Usage Example
+
+```go
+// Merge three duplicate competence records into one
+mergedRec := schema.NewMemoryRecord(
+    "",
+    schema.MemoryTypeCompetence,
+    schema.SensitivityMedium,
+    &schema.CompetencePayload{
+        Kind:      "competence",
+        SkillName: "deploy_to_production",
+        Triggers: []schema.Trigger{
+            {Signal: "deploy_command"},
+        },
+        Recipe: []schema.RecipeStep{
+            {Step: "Run tests", Tool: "test"},
+            {Step: "Build artifacts", Tool: "build"},
+            {Step: "Deploy", Tool: "kubectl"},
+        },
+        Version: "2.0",
+    },
+)
+mergedRec.Confidence = 0.95
+
+merged, err := m.Merge(
+    ctx,
+    []string{"comp-1", "comp-2", "comp-3"},
+    mergedRec,
+    "consolidation",
+    "Consolidated three duplicate deployment procedures",
+)
+```
+
+## Contest
+
+**Purpose:** Mark a record as contested when conflicting evidence appears.
+
+<Note>
+  Contest does NOT retract the record; it marks uncertainty until resolved. The record's salience remains unchanged.
+</Note>
+
+### Behavior
+
+1. Record: semantic status → `contested`
+2. Relation: `contested_by` link added to conflicting record
+3. Audit: `revise` action entry added
+
+### Implementation
+
+```go
+// From pkg/revision/contest.go
+func (s *Service) Contest(ctx context.Context, id string, contestingRef string, actor, rationale string) error {
+    return storage.WithTransaction(ctx, s.store, func(tx storage.Transaction) error {
+        record, err := tx.Get(ctx, id)
+        if err := ensureRevisable(record); err != nil {
+            return err
+        }
+        
+        // Mark semantic records as contested
+        if sp, ok := record.Payload.(*schema.SemanticPayload); ok {
+            if sp.Revision == nil {
+                sp.Revision = &schema.RevisionState{}
+            }
+            sp.Revision.Status = schema.RevisionStatusContested
+        }
+        
+        record.UpdatedAt = time.Now().UTC()
+        tx.Update(ctx, record)
+        
+        // Add relation to the contesting record
+        if contestingRef != "" {
+            tx.AddRelation(ctx, id, schema.Relation{
+                Predicate: "contested_by",
+                TargetID:  contestingRef,
+                Weight:    1.0,
+            })
+        }
+        
+        return tx.AddAuditEntry(ctx, id, schema.AuditEntry{
+            Action:    schema.AuditActionRevise,
+            Actor:     actor,
+            Timestamp: time.Now().UTC(),
+            Rationale: rationale,
+        })
+    })
+}
+```
+
+### Usage Example
+
+```go
+// New observation contradicts existing fact
+err := m.Contest(
+    ctx,
+    "sem-fact-old",
+    "sem-fact-new",
+    "agent",
+    "New observation shows different API endpoint; requires resolution",
+)
+```
+
+## Revision Status Flow
+
+For semantic records, revision status follows this state machine:
+
+```
+┌────────┐
+│ active │ (initial state)
+└───┬────┘
+    │
+    ├─── Supersede ────▶ ┌───────────┐
+    │                    │ retracted │
+    │                    └───────────┘
+    ├─── Retract ──────▶ ┌───────────┐
+    │                    │ retracted │
+    │                    └───────────┘
+    └─── Contest ──────▶ ┌───────────┐
+                         │ contested │
+                         └─────┬─────┘
+                               │
+                               ├─── Resolve via Supersede ────▶ retracted (old) + active (new)
+                               └─── Retract ──────────────────▶ retracted
+```
+
+## Audit Trail
+
+Every revision operation creates audit entries:
+
+```go
+type AuditEntry struct {
+    Action    AuditAction // create | revise | fork | merge | delete
+    Actor     string
+    Timestamp time.Time
+    Rationale string
+}
+```
+
+Audit entries are:
+- Immutable once written
+- Stored on both affected records (source and target)
+- Queryable via the audit log interface
+- Used for compliance and debugging
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Supersede" icon="rotate">
+    **Use when:**
+    - A fact becomes outdated
+    - Preferences change
+    - Better information is available
+    
+    **Always provide:**
+    - Clear rationale
+    - Evidence references
+  </Card>
+  <Card title="Fork" icon="code-branch">
+    **Use when:**
+    - Conditional variants needed
+    - Context-dependent behavior
+    - Different scopes require different values
+    
+    **Remember:**
+    - Both records remain active
+  </Card>
+  <Card title="Retract" icon="ban">
+    **Use when:**
+    - A fact is definitively wrong
+    - No replacement is ready
+    - Preserving audit trail is important
+    
+    **Note:**
+    - Retraction is visible in metrics
+  </Card>
+  <Card title="Merge" icon="code-merge">
+    **Use when:**
+    - Duplicates identified
+    - Multiple sources say same thing
+    - Consolidation improves clarity
+    
+    **Ensure:**
+    - Merged record is more complete
+  </Card>
+</CardGroup>
+
+## Common Patterns
+
+### Preference Evolution
+
+```go
+// 1. Initial preference
+initial := createSemanticRecord("user", "prefers_backend", "go")
+m.IngestObservation(ctx, initial)
+
+// 2. Later: user switches to Rust
+rustPref := createSemanticRecord("user", "prefers_backend", "rust")
+m.Supersede(ctx, initial.ID, rustPref, "agent", "User adopted Rust")
+
+// 3. Special case: Python for data science
+pythonPref := createSemanticRecord("user", "prefers_backend", "python")
+pythonPref.Payload.Validity = schema.Validity{
+    Mode: schema.ValidityModeConditional,
+    Conditions: map[string]any{"domain": "data_science"},
+}
+m.Fork(ctx, rustPref.ID, pythonPref, "agent", "Data science exception")
+```
+
+### Conflict Resolution
+
+```go
+// 1. Two agents create conflicting facts
+fact1 := createSemanticRecord("api", "endpoint", "https://api-v1.example.com")
+fact2 := createSemanticRecord("api", "endpoint", "https://api-v2.example.com")
+
+// 2. Mark conflict
+m.Contest(ctx, fact1.ID, fact2.ID, "monitor", "Two different endpoints observed")
+
+// 3. Investigate and resolve
+correctFact := createSemanticRecord("api", "endpoint", "https://api-v2.example.com")
+m.Supersede(ctx, fact1.ID, correctFact, "admin", "Verified: v2 is correct")
+m.Retract(ctx, fact2.ID, "admin", "Duplicate of resolved conflict")
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Trust & Security" icon="shield" href="/concepts/trust-and-security">
+    Learn about sensitivity levels and trust-gated retrieval
+  </Card>
+  <Card title="Decay & Consolidation" icon="clock-rotate-left" href="/concepts/decay-and-consolidation">
+    Understand how memory evolves over time
+  </Card>
+</CardGroup>

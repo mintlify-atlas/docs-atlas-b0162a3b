@@ -1,0 +1,303 @@
+---
+title: 'Membrane'
+description: 'Core API surface for the Membrane memory substrate'
+---
+
+The `membrane` package provides the unified API surface for the Membrane memory substrate. It wires together all subsystems including ingestion, retrieval, decay, revision, consolidation, and metrics.
+
+## Overview
+
+The `Membrane` type is the main entry point for interacting with the memory substrate. It manages all subsystems and provides delegate methods for common operations.
+
+## Membrane Type
+
+The `Membrane` struct encapsulates all subsystems:
+
+```go
+type Membrane struct {
+    config *Config
+    store  storage.Store
+
+    ingestion     *ingestion.Service
+    retrieval     *retrieval.Service
+    decay         *decay.Service
+    revision      *revision.Service
+    consolidation *consolidation.Service
+    metrics       *metrics.Collector
+    embedding     *embedding.Service
+
+    decayScheduler  *decay.Scheduler
+    consolScheduler *consolidation.Scheduler
+}
+```
+
+## Initialization
+
+### New()
+
+Creates and initializes a new Membrane instance from a Config.
+
+```go
+func New(cfg *Config) (*Membrane, error)
+```
+
+**Parameters:**
+- `cfg` - Configuration specifying backend, paths, and subsystem settings
+
+**Returns:**
+- `*Membrane` - Ready-to-start instance with all subsystems initialized
+- `error` - Initialization error if any
+
+**Example:**
+```go
+package main
+
+import (
+    "github.com/GustyCube/membrane/pkg/membrane"
+)
+
+func main() {
+    cfg := membrane.DefaultConfig()
+    cfg.DBPath = "./data/membrane.db"
+    cfg.Backend = "sqlite"
+    cfg.DefaultSensitivity = "low"
+    
+    m, err := membrane.New(cfg)
+    if err != nil {
+        panic(err)
+    }
+    defer m.Stop()
+}
+```
+
+### DefaultConfig()
+
+Returns a Config populated with sensible defaults.
+
+```go
+func DefaultConfig() *Config
+```
+
+**Returns:**
+```go
+&Config{
+    Backend:                      "sqlite",
+    DBPath:                       "membrane.db",
+    ListenAddr:                   ":9090",
+    DecayInterval:                1 * time.Hour,
+    ConsolidationInterval:        6 * time.Hour,
+    DefaultSensitivity:           "low",
+    SelectionConfidenceThreshold: 0.7,
+    EmbeddingDimensions:          1536,
+    RateLimitPerSecond:           100,
+}
+```
+
+## Lifecycle Methods
+
+### Start()
+
+Begins background schedulers for decay and consolidation.
+
+```go
+func (m *Membrane) Start(ctx context.Context) error
+```
+
+**Parameters:**
+- `ctx` - Context for controlling scheduler lifecycle
+
+**Example:**
+```go
+ctx := context.Background()
+if err := m.Start(ctx); err != nil {
+    log.Fatalf("failed to start membrane: %v", err)
+}
+```
+
+### Stop()
+
+Gracefully shuts down schedulers and closes the storage backend.
+
+```go
+func (m *Membrane) Stop() error
+```
+
+**Example:**
+```go
+defer func() {
+    if err := m.Stop(); err != nil {
+        log.Printf("error stopping membrane: %v", err)
+    }
+}()
+```
+
+## Configuration
+
+The `Config` type controls all aspects of Membrane behavior:
+
+<ParamField path="Backend" type="string" default="sqlite">
+  Storage backend: `"sqlite"` or `"postgres"`
+</ParamField>
+
+<ParamField path="DBPath" type="string" default="membrane.db">
+  SQLite database file path
+</ParamField>
+
+<ParamField path="PostgresDSN" type="string">
+  PostgreSQL connection string (required when Backend is `"postgres"`)
+</ParamField>
+
+<ParamField path="DecayInterval" type="time.Duration" default="1h">
+  How often the decay scheduler runs
+</ParamField>
+
+<ParamField path="ConsolidationInterval" type="time.Duration" default="6h">
+  How often the consolidation scheduler runs
+</ParamField>
+
+<ParamField path="DefaultSensitivity" type="string" default="low">
+  Default sensitivity level for ingested records: `"public"`, `"low"`, `"medium"`, `"high"`, or `"hyper"`
+</ParamField>
+
+<ParamField path="SelectionConfidenceThreshold" type="float64" default="0.7">
+  Minimum confidence for retrieval selector to consider competence or plan_graph candidates
+</ParamField>
+
+<ParamField path="EncryptionKey" type="string">
+  SQLCipher encryption key for SQLite. Read from `MEMBRANE_ENCRYPTION_KEY` env var if not set
+</ParamField>
+
+<ParamField path="EmbeddingEndpoint" type="string">
+  HTTP endpoint for generating embeddings
+</ParamField>
+
+<ParamField path="EmbeddingModel" type="string">
+  Embedding model name sent to the endpoint
+</ParamField>
+
+<ParamField path="EmbeddingDimensions" type="int" default="1536">
+  Output dimension of the embedding model
+</ParamField>
+
+<ParamField path="EmbeddingAPIKey" type="string">
+  API key for embedding endpoint. Read from `MEMBRANE_EMBEDDING_API_KEY` env var if not set
+</ParamField>
+
+## Delegate Methods
+
+Membrane exposes all subsystem operations through delegate methods:
+
+### Ingestion
+
+```go
+func (m *Membrane) IngestEvent(ctx context.Context, req ingestion.IngestEventRequest) (*schema.MemoryRecord, error)
+func (m *Membrane) IngestToolOutput(ctx context.Context, req ingestion.IngestToolOutputRequest) (*schema.MemoryRecord, error)
+func (m *Membrane) IngestObservation(ctx context.Context, req ingestion.IngestObservationRequest) (*schema.MemoryRecord, error)
+func (m *Membrane) IngestOutcome(ctx context.Context, req ingestion.IngestOutcomeRequest) (*schema.MemoryRecord, error)
+func (m *Membrane) IngestWorkingState(ctx context.Context, req ingestion.IngestWorkingStateRequest) (*schema.MemoryRecord, error)
+```
+
+See [Ingestion](/go/ingestion) for details.
+
+### Retrieval
+
+```go
+func (m *Membrane) Retrieve(ctx context.Context, req *retrieval.RetrieveRequest) (*retrieval.RetrieveResponse, error)
+func (m *Membrane) RetrieveByID(ctx context.Context, id string, trust *retrieval.TrustContext) (*schema.MemoryRecord, error)
+```
+
+See [Retrieval](/go/retrieval) for details.
+
+### Revision
+
+```go
+func (m *Membrane) Supersede(ctx context.Context, oldID string, newRec *schema.MemoryRecord, actor, rationale string) (*schema.MemoryRecord, error)
+func (m *Membrane) Fork(ctx context.Context, sourceID string, forkedRec *schema.MemoryRecord, actor, rationale string) (*schema.MemoryRecord, error)
+func (m *Membrane) Retract(ctx context.Context, id, actor, rationale string) error
+func (m *Membrane) Merge(ctx context.Context, ids []string, mergedRec *schema.MemoryRecord, actor, rationale string) (*schema.MemoryRecord, error)
+func (m *Membrane) Contest(ctx context.Context, id, contestingRef, actor, rationale string) error
+```
+
+### Decay
+
+```go
+func (m *Membrane) Reinforce(ctx context.Context, id, actor, rationale string) error
+func (m *Membrane) Penalize(ctx context.Context, id string, amount float64, actor, rationale string) error
+```
+
+### Metrics
+
+```go
+func (m *Membrane) GetMetrics(ctx context.Context) (*metrics.Snapshot, error)
+```
+
+## Complete Example
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "time"
+
+    "github.com/GustyCube/membrane/pkg/membrane"
+    "github.com/GustyCube/membrane/pkg/ingestion"
+    "github.com/GustyCube/membrane/pkg/retrieval"
+    "github.com/GustyCube/membrane/pkg/schema"
+)
+
+func main() {
+    // Initialize with default config
+    cfg := membrane.DefaultConfig()
+    cfg.DBPath = "./membrane.db"
+    cfg.DefaultSensitivity = "low"
+    
+    m, err := membrane.New(cfg)
+    if err != nil {
+        log.Fatalf("failed to create membrane: %v", err)
+    }
+    defer m.Stop()
+    
+    // Start background schedulers
+    ctx := context.Background()
+    if err := m.Start(ctx); err != nil {
+        log.Fatalf("failed to start membrane: %v", err)
+    }
+    
+    // Ingest an event
+    rec, err := m.IngestEvent(ctx, ingestion.IngestEventRequest{
+        Source:    "user-input",
+        EventKind: "command",
+        Ref:       "cmd-123",
+        Summary:   "User requested file listing",
+        Timestamp: time.Now(),
+        Tags:      []string{"cli", "ls"},
+        Scope:     "user",
+    })
+    if err != nil {
+        log.Fatalf("failed to ingest event: %v", err)
+    }
+    log.Printf("Ingested event: %s", rec.ID)
+    
+    // Retrieve with trust context
+    trust := retrieval.NewTrustContext(
+        schema.SensitivityMedium,
+        true,
+        "agent-1",
+        []string{"user"},
+    )
+    
+    resp, err := m.Retrieve(ctx, &retrieval.RetrieveRequest{
+        TaskDescriptor: "list files in directory",
+        Trust:          trust,
+        MinSalience:    0.5,
+        Limit:          10,
+    })
+    if err != nil {
+        log.Fatalf("failed to retrieve: %v", err)
+    }
+    
+    log.Printf("Retrieved %d records", len(resp.Records))
+}
+```
