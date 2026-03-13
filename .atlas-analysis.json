@@ -1,0 +1,141 @@
+{
+  "projectType": "framework",
+  "projectName": "Membrane",
+  "projectDescription": "A selective learning and memory substrate for agentic systems with typed, revisable, decayable memory and trust-aware retrieval.",
+  "theme": "aspen",
+  "primaryColor": "#7C3AED",
+  "lightColor": "#A78BFA",
+  "darkColor": "#5B21B6",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/memory-types",
+              "concepts/revision-operations",
+              "concepts/trust-and-security",
+              "concepts/decay-and-consolidation"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/embedded-usage",
+              "guides/daemon-deployment",
+              "guides/llm-integration",
+              "guides/configuration",
+              "guides/observability"
+            ]
+          },
+          {
+            "group": "Client SDKs",
+            "pages": [
+              "clients/typescript",
+              "clients/python",
+              "clients/openclaw"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "gRPC API",
+            "pages": [
+              "api/overview",
+              "api/ingestion",
+              "api/retrieval",
+              "api/revision",
+              "api/metrics"
+            ]
+          },
+          {
+            "group": "Go Library",
+            "pages": [
+              "go/membrane",
+              "go/ingestion",
+              "go/retrieval",
+              "go/schema",
+              "go/storage"
+            ]
+          },
+          {
+            "group": "Memory Schemas",
+            "pages": [
+              "schemas/episodic",
+              "schemas/working",
+              "schemas/semantic",
+              "schemas/competence",
+              "schemas/plan-graph"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Advanced",
+        "groups": [
+          {
+            "group": "Deployment",
+            "pages": [
+              "advanced/deployment-tiers",
+              "advanced/postgres-setup",
+              "advanced/vector-retrieval",
+              "advanced/security",
+              "advanced/performance"
+            ]
+          },
+          {
+            "group": "Development",
+            "pages": [
+              "development/contributing",
+              "development/testing",
+              "development/evaluation"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Typed memory with explicit schemas and lifecycles",
+    "Revisable knowledge with supersede, fork, retract, merge, and contest operations",
+    "Competence learning for procedural knowledge",
+    "Decay and consolidation for memory management",
+    "Trust-aware retrieval with sensitivity levels",
+    "LLM-based semantic extraction",
+    "Vector-aware retrieval with pgvector",
+    "gRPC API with TypeScript and Python SDKs",
+    "Embedded Go library",
+    "Built-in observability and metrics"
+  ],
+  "publicApiSurface": [
+    "IngestEvent",
+    "IngestToolOutput",
+    "IngestObservation",
+    "IngestOutcome",
+    "IngestWorkingState",
+    "Retrieve",
+    "RetrieveByID",
+    "Supersede",
+    "Fork",
+    "Retract",
+    "Merge",
+    "Contest",
+    "Reinforce",
+    "Penalize",
+    "GetMetrics"
+  ]
+}
